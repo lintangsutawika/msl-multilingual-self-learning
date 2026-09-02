@@ -1,0 +1,29 @@
+[project]
+name = "msl-multilingual-self-learning"
+version = "0.1.0"
+description = "Multilingual self-learning: mini-swe-agent evaluated on SWE-bench Multilingual via harbor."
+readme = "README.md"
+# harbor needs Python >=3.12.
+requires-python = ">=3.12, <3.14"
+dependencies = [
+    # The agent-eval driver. [modal] pulls the Modal backend; drop it if you only ever
+    # run ENV=docker/singularity. `uv sync` puts `harbor` on PATH (.venv/bin/harbor).
+    "harbor[modal]",
+    # The agent under evaluation. [full] pulls swe-rex (needed by some harbor envs).
+    "mini-swe-agent[full]>=2.4.5",
+    # Writable-rootfs Singularity environment for harbor (ENV=singularity), for running
+    # the SWE-bench Multilingual task containers ON a PBS/SLURM node (no Docker/Modal) on
+    # FUSE-restricted clusters. Not needed for ENV=docker/modal. Its own pyproject
+    # requires harbor>=0.22,<0.23, satisfied by the harbor git pin below.
+    "harbor-singularity-hpc",
+]
+
+[tool.uv.sources]
+# Pin harbor to an exact commit (not branch=main): harbor's job lock.json carries a
+# schema_version that is part of job-lock equality, so walking main forward on one
+# cluster can make `harbor job resume` reject dirs created under the older harbor. Keep
+# every machine on the same rev so resumes reconcile. Same rev as the sibling tts repo.
+harbor = { git = "https://github.com/harbor-framework/harbor.git", rev = "c178c20710c362ef806c5d5d18852f95b21ca34b" }
+# The Singularity-on-HPC environment, pinned to an exact commit (its overrides track
+# harbor's internals, so pin them together and bump both deliberately).
+harbor-singularity-hpc = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git", rev = "91d6a3315770c51b846c782ef88488203bb27854" }
