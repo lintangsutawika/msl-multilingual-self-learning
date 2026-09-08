@@ -17,6 +17,7 @@ dependencies = [
     # requires harbor>=0.22,<0.23, satisfied by the harbor git pin below.
     "harbor-singularity-hpc",
     "datasets",
+    "vllm>=0.28.0",
 ]
 
 [tool.uv.sources]
