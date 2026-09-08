@@ -1,6 +1,5 @@
 import base64
 import re
-from pathlib import Path
 from typing import override
 
 from openai import AsyncOpenAI
@@ -18,7 +17,7 @@ class SimpleCodeAgent(BaseAgent):
 
     @override
     def version(self) -> str:
-        return "0.1.0"
+        return "0.2.0"
 
     @override
     async def setup(self, environment: BaseEnvironment) -> None:
@@ -38,6 +37,17 @@ class SimpleCodeAgent(BaseAgent):
 
         base_url = self._get_env("OPENAI_BASE_URL")
         api_key = self._get_env("OPENAI_API_KEY") or "dummy"
+
+        # Defaults preserve the behavior of the existing Python benchmark.
+        language = self._get_env("LANGUAGE") or "python"
+        solution_file = self._get_env("SOLUTION_FILE") or "solution.py"
+
+        # Keep the filename constrained to a basename so an agent env var
+        # cannot redirect writes outside /workspace.
+        if solution_file != solution_file.split("/")[-1]:
+            raise ValueError(
+                "SOLUTION_FILE must be a filename, not a path."
+            )
 
         client = AsyncOpenAI(
             base_url=base_url,
@@ -63,7 +73,7 @@ class SimpleCodeAgent(BaseAgent):
                     "content": (
                         "You are a coding assistant. "
                         "Solve the programming problem exactly as requested. "
-                        "Return only the final Python implementation."
+                        f"Return only the final {language} source code."
                     ),
                 },
                 {
@@ -74,10 +84,10 @@ class SimpleCodeAgent(BaseAgent):
             temperature=0.0,
             max_tokens=4096,
             extra_body={
-               "chat_template_kwargs": {
+                "chat_template_kwargs": {
                     "enable_thinking": False,
-               }
-          },
+                }
+            },
         )
 
         content = response.choices[0].message.content
@@ -89,28 +99,34 @@ class SimpleCodeAgent(BaseAgent):
 
         # Encode the source so arbitrary quotes/newlines in generated code
         # cannot break the shell command.
-        encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode(
+            code.encode("utf-8")
+        ).decode("ascii")
+
+        workspace_path = f"/workspace/{solution_file}"
 
         command = (
             "mkdir -p /workspace && "
-            f"echo '{encoded}' | base64 -d > /workspace/solution.py"
+            f"echo '{encoded}' | base64 -d > {workspace_path}"
         )
 
         result = await environment.exec(command=command)
 
         if result.return_code != 0:
             raise RuntimeError(
-                f"Failed to write solution.py: {result.stderr}"
+                f"Failed to write {workspace_path}: {result.stderr}"
             )
 
-        # Save the raw model response on the host for later analysis.
+        # Save the raw model response and extracted source on the host
+        # for later analysis.
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+
         (self.logs_dir / "model_response.txt").write_text(
             content,
             encoding="utf-8",
         )
 
-        (self.logs_dir / "solution.py").write_text(
+        (self.logs_dir / solution_file).write_text(
             code,
             encoding="utf-8",
         )
@@ -118,14 +134,15 @@ class SimpleCodeAgent(BaseAgent):
     @staticmethod
     def _extract_code(response: str) -> str:
         """
-        Extract Python code from a Markdown fenced response.
+        Extract source code from a Markdown fenced response.
 
+        Accept any common language tag (python, cpp, c++, rust, java, etc.).
         If the model returns plain code without fences, use the full response.
         """
         match = re.search(
-            r"```(?:python)?\s*(.*?)```",
+            r"```(?:[A-Za-z0-9_+#.\-]+)?\s*(.*?)```",
             response,
-            flags=re.DOTALL | re.IGNORECASE,
+            flags=re.DOTALL,
         )
 
         if match:

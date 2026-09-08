@@ -245,3 +245,17 @@ logs/
 
 # macOS
 .DS_Store
+
+# Generated LeetCode benchmark tasks
+benchmarks/leetcode/generated/
+
+# Temporary local benchmark/debug files
+tmp/
+temp/
+
+# Local Harbor scratch / runtime artifacts
+*.sandbox
+*.lock
+
+# Local model server logs
+vllm*.log

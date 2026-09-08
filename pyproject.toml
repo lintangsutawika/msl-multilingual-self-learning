@@ -16,6 +16,7 @@ dependencies = [
     # FUSE-restricted clusters. Not needed for ENV=docker/modal. Its own pyproject
     # requires harbor>=0.22,<0.23, satisfied by the harbor git pin below.
     "harbor-singularity-hpc",
+    "datasets",
 ]
 
 [tool.uv.sources]

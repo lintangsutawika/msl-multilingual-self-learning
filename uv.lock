@@ -1396,6 +1396,7 @@ name = "msl-multilingual-self-learning"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "datasets" },
     { name = "harbor", extra = ["modal"] },
     { name = "harbor-singularity-hpc" },
     { name = "mini-swe-agent", extra = ["full"] },
@@ -1403,6 +1404,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "datasets" },
     { name = "harbor", extras = ["modal"], git = "https://github.com/harbor-framework/harbor.git?rev=c178c20710c362ef806c5d5d18852f95b21ca34b" },
     { name = "harbor-singularity-hpc", git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=91d6a3315770c51b846c782ef88488203bb27854" },
     { name = "mini-swe-agent", extras = ["full"], specifier = ">=2.4.5" },
