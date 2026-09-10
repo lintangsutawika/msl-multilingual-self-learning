@@ -14,7 +14,7 @@ class SimpleCodeAgent(BaseAgent):
         return "simple-code-agent"
 
     def version(self) -> str:
-        return "0.3.1"
+        return "0.4.0"
 
     async def setup(
         self,
@@ -57,10 +57,14 @@ class SimpleCodeAgent(BaseAgent):
             "LANGUAGE"
         )
 
-        if language is None:
-            raise RuntimeError(
-                "Missing required agent environment variable: LANGUAGE"
-            )
+        match = re.match(r"Language: (python|cpp|go|java)\n", instruction)
+        if match is not None:
+            task_language = match.group(1)
+            if language is not None and language != task_language:
+                raise ValueError("LANGUAGE does not match the task prompt")
+            language = task_language
+        if language not in {"python", "cpp", "go", "java"}:
+            raise ValueError("Task must specify a supported language")
 
         base_url = (
             self._get_env(
@@ -128,6 +132,9 @@ class SimpleCodeAgent(BaseAgent):
                 }
             },
         )
+        await client.close()
+        if response.choices[0].finish_reason == "length":
+            raise RuntimeError("Model response was truncated before completion")
 
         content = (
             response
@@ -159,6 +166,10 @@ class SimpleCodeAgent(BaseAgent):
             solution,
             ensure_ascii=False,
         )
+        # Preserve the exact submission for review after Harbor tears down the
+        # container. The agent's only workspace output is solution.json.
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / "solution.json").write_text(solution_json, encoding="utf-8")
 
         encoded = base64.b64encode(
             solution_json.encode(

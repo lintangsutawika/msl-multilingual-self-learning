@@ -8,6 +8,7 @@ from typing import Any
 
 from .dataset import load_test_split
 from .interfaces.resolve import resolve_interface
+from .interfaces.derive import parse_hf_python_signature
 
 
 LANGUAGES = (
@@ -318,6 +319,12 @@ def _build_record(
             ),
         },
         "metadata": {
+            "canonical_parameter_names": [
+                parameter.name
+                for parameter in parse_hf_python_signature(
+                    _problem_value(problem, "starter_code")
+                ).parameters
+            ],
             "leetcode_dataset_entry_point": (
                 _problem_value(
                     problem,
