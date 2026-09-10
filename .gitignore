@@ -259,3 +259,6 @@ temp/
 
 # Local model server logs
 vllm*.log
+
+# External benchmark/reference repositories
+external/

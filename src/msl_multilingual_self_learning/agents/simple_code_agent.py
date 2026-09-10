@@ -1,79 +1,118 @@
-import base64
-import re
-from typing import override
+from __future__ import annotations
 
-from openai import AsyncOpenAI
+import base64
+import json
+import re
 
 from harbor.agents.base import BaseAgent
-from harbor.environments.base import BaseEnvironment
-from harbor.models.agent.context import AgentContext
+from openai import AsyncOpenAI
 
 
 class SimpleCodeAgent(BaseAgent):
     @staticmethod
-    @override
     def name() -> str:
         return "simple-code-agent"
 
-    @override
     def version(self) -> str:
-        return "0.2.0"
+        return "0.3.1"
 
-    @override
-    async def setup(self, environment: BaseEnvironment) -> None:
-        # Nothing needs to be installed inside the task container.
-        # The LLM call happens from the Harbor controller process.
-        return
+    async def setup(
+        self,
+        environment,
+    ) -> None:
+        """
+        No additional setup is required.
 
-    @override
+        The model server runs outside the Harbor sandbox and is accessed
+        through its OpenAI-compatible HTTP endpoint.
+        """
+        return None
+
+    def _strip_markdown_fences(
+        self,
+        text: str,
+    ) -> str:
+        text = text.strip()
+
+        match = re.fullmatch(
+            r"```(?:[A-Za-z0-9_+#.\-]+)?\s*\n(.*?)```",
+            text,
+            flags=re.DOTALL,
+        )
+
+        if match is not None:
+            return match.group(1).strip()
+
+        return text
+
     async def run(
         self,
         instruction: str,
-        environment: BaseEnvironment,
-        context: AgentContext,
+        environment,
+        context,
     ) -> None:
-        if self.model_name is None:
-            raise ValueError("SimpleCodeAgent requires --model/-m.")
-
-        base_url = self._get_env("OPENAI_BASE_URL")
-        api_key = self._get_env("OPENAI_API_KEY") or "dummy"
-
-        # Defaults preserve the behavior of the existing Python benchmark.
-        language = self._get_env("LANGUAGE") or "python"
-        solution_file = self._get_env("SOLUTION_FILE") or "solution.py"
-
-        # Keep the filename constrained to a basename so an agent env var
-        # cannot redirect writes outside /workspace.
-        if solution_file != solution_file.split("/")[-1]:
-            raise ValueError(
-                "SOLUTION_FILE must be a filename, not a path."
-            )
-
-        client = AsyncOpenAI(
-            base_url=base_url,
-            api_key=api_key,
+        # Harbor --ae values are passed through BaseAgent.extra_env,
+        # so use _get_env() rather than os.environ directly.
+        language = self._get_env(
+            "LANGUAGE"
         )
 
-        # Harbor model names may look like:
+        if language is None:
+            raise RuntimeError(
+                "Missing required agent environment variable: LANGUAGE"
+            )
+
+        base_url = (
+            self._get_env(
+                "OPENAI_BASE_URL"
+            )
+            or "http://127.0.0.1:8000/v1"
+        )
+
+        api_key = (
+            self._get_env(
+                "OPENAI_API_KEY"
+            )
+            or "EMPTY"
+        )
+
+        model_name = (
+            self._get_env(
+                "MODEL_NAME"
+            )
+            or self.model_name
+            or "Qwen/Qwen3.5-9B"
+        )
+
+        # Harbor model names may include the provider prefix:
         #
-        #   openai/Qwen/Qwen3-Coder-30B-A3B-Instruct
+        #   openai/Qwen/Qwen3.5-9B
         #
-        # but an OpenAI-compatible vLLM server usually expects:
+        # vLLM expects:
         #
-        #   Qwen/Qwen3-Coder-30B-A3B-Instruct
-        model = self.model_name
-        if model.startswith("openai/"):
-            model = model[len("openai/"):]
+        #   Qwen/Qwen3.5-9B
+        if model_name.startswith(
+            "openai/"
+        ):
+            model_name = model_name[
+                len("openai/"):
+            ]
+
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
 
         response = await client.chat.completions.create(
-            model=model,
+            model=model_name,
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "You are a coding assistant. "
-                        "Solve the programming problem exactly as requested. "
-                        f"Return only the final {language} source code."
+                        "Return only the complete source code "
+                        "for the requested solution. "
+                        "Do not include Markdown fences or explanations."
                     ),
                 },
                 {
@@ -81,7 +120,7 @@ class SimpleCodeAgent(BaseAgent):
                     "content": instruction,
                 },
             ],
-            temperature=0.0,
+            temperature=0,
             max_tokens=4096,
             extra_body={
                 "chat_template_kwargs": {
@@ -90,62 +129,59 @@ class SimpleCodeAgent(BaseAgent):
             },
         )
 
-        content = response.choices[0].message.content
+        content = (
+            response
+            .choices[0]
+            .message
+            .content
+        )
 
-        if not content:
-            raise RuntimeError("Model returned an empty response.")
+        if content is None:
+            raise RuntimeError(
+                "Model returned no content"
+            )
 
-        code = self._extract_code(content)
+        code = self._strip_markdown_fences(
+            content
+        )
 
-        # Encode the source so arbitrary quotes/newlines in generated code
-        # cannot break the shell command.
+        if not code:
+            raise RuntimeError(
+                "Model returned empty source code"
+            )
+
+        solution = {
+            "language": language,
+            "code": code,
+        }
+
+        solution_json = json.dumps(
+            solution,
+            ensure_ascii=False,
+        )
+
         encoded = base64.b64encode(
-            code.encode("utf-8")
-        ).decode("ascii")
-
-        workspace_path = f"/workspace/{solution_file}"
+            solution_json.encode(
+                "utf-8"
+            )
+        ).decode(
+            "ascii"
+        )
 
         command = (
             "mkdir -p /workspace && "
-            f"echo '{encoded}' | base64 -d > {workspace_path}"
+            f"printf '%s' '{encoded}' "
+            "| base64 -d "
+            "> /workspace/solution.json"
         )
 
-        result = await environment.exec(command=command)
+        result = await environment.exec(
+            command
+        )
 
         if result.return_code != 0:
             raise RuntimeError(
-                f"Failed to write {workspace_path}: {result.stderr}"
+                "Failed to write "
+                "/workspace/solution.json: "
+                f"{result.stderr}"
             )
-
-        # Save the raw model response and extracted source on the host
-        # for later analysis.
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
-
-        (self.logs_dir / "model_response.txt").write_text(
-            content,
-            encoding="utf-8",
-        )
-
-        (self.logs_dir / solution_file).write_text(
-            code,
-            encoding="utf-8",
-        )
-
-    @staticmethod
-    def _extract_code(response: str) -> str:
-        """
-        Extract source code from a Markdown fenced response.
-
-        Accept any common language tag (python, cpp, c++, rust, java, etc.).
-        If the model returns plain code without fences, use the full response.
-        """
-        match = re.search(
-            r"```(?:[A-Za-z0-9_+#.\-]+)?\s*(.*?)```",
-            response,
-            flags=re.DOTALL,
-        )
-
-        if match:
-            return match.group(1).strip() + "\n"
-
-        return response.strip() + "\n"
