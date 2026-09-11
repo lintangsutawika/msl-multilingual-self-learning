@@ -216,3 +216,51 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# Project-specific
+# ---------------------------------------------------------------------------
+
+# Harbor evaluation outputs
+jobs/
+
+# Harbor / Singularity caches and generated container artifacts
+.harbor/
+.singularity/
+singularity-cache/
+*.sif
+*.img
+
+# Local model / Hugging Face caches
+.cache/
+huggingface/
+.hf_cache/
+
+# Slurm output
+slurm-*.out
+slurm-*.err
+
+# Local experiment logs
+logs/
+
+# macOS
+.DS_Store
+
+# Generated LeetCode benchmark tasks
+benchmarks/leetcode/generated/
+
+# Temporary local benchmark/debug files
+tmp/
+temp/
+
+# Local Harbor scratch / runtime artifacts
+*.sandbox
+*.lock
+
+# Local model server logs
+vllm*.log
+
+# External benchmark/reference repositories
+external/
+# Generated LeetCode Harbor tasks
+benchmarks/leetcode/tasks/
