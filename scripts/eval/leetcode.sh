@@ -6,6 +6,9 @@ TASKS="${TASKS:-benchmarks/leetcode/tasks}"
 AGENT="${AGENT:-model}"
 JOB_NAME="${JOB_NAME:-leetcode-unified-$(date +%Y%m%d-%H%M%S)}"
 args=(run -p "$TASKS" -n "${N_CONCURRENT:-1}" --job-name "$JOB_NAME" -o jobs -y)
+if [[ -n "${N_TASKS:-}" ]]; then
+    args+=(-l "$N_TASKS")
+fi
 if [[ "$AGENT" == oracle ]]; then
     args+=(-a oracle)
 else
