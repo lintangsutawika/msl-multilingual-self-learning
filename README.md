@@ -130,7 +130,7 @@ The LeetCode benchmark is intended to be agent-independent.
 | `MODEL`                 | *(required)*            | litellm model id, e.g. `openai/<served-name>` or `anthropic/claude-...`.  |
 | `MODEL_BASE_URL`        | —                       | OpenAI-compatible base URL (vLLM). Omit for a native provider.            |
 | `MODEL_API_KEY`         | `dummy`                 | Key for that server/provider.                                             |
-| `ENV`                   | `singularity`           | `singularity` (on-node, via harbor-singularity-hpc) | `docker` | `modal`. |
+| `ENV`                   | `singularity` (on-node, via harbor-singularity-hpc), `docker`, or `modal`. |
 | `N_CONCURRENT`          | `4`                     | Parallel trials.                                                          |
 | `N_TASKS`               | *(all 300)*             | Subset size for smoke tests (`-l`).                                       |
 | `DATASET`               | `swebench_multilingual` | Harbor dataset id (resolves against the default hub registry).            |
