@@ -383,6 +383,11 @@ def generate_dataset(
             record
         )
 
+    if not records:
+        raise RuntimeError(
+            "No problems with complete Doocs interfaces were generated"
+        )
+
     # Only create/replace the output after generation
     # succeeds. This prevents leaving behind an empty
     # dataset if something crashes midway.
