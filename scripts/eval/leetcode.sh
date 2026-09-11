@@ -9,8 +9,10 @@ args=(run -p "$TASKS" -n "${N_CONCURRENT:-1}" --job-name "$JOB_NAME" -o jobs -y)
 if [[ "$AGENT" == oracle ]]; then
     args+=(-a oracle)
 else
+    model="${MODEL:-Qwen/Qwen3.5-9B}"
+    model="${model#openai/}"
     args+=(-a msl_multilingual_self_learning.agents.simple_code_agent:SimpleCodeAgent
-        -m "openai/${MODEL:-Qwen/Qwen3.5-9B}"
+        -m "openai/$model"
         --ae "OPENAI_BASE_URL=${MODEL_BASE_URL:-http://127.0.0.1:8000/v1}"
         --ae "OPENAI_API_KEY=${MODEL_API_KEY:-EMPTY}")
     if [[ -n "${LANGUAGE:-}" ]]; then
