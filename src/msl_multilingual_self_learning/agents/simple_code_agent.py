@@ -125,7 +125,7 @@ class SimpleCodeAgent(BaseAgent):
                 },
             ],
             temperature=0,
-            max_tokens=4096,
+            max_tokens=8192,
             extra_body={
                 "chat_template_kwargs": {
                     "enable_thinking": False,
