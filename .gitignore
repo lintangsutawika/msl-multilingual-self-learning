@@ -263,4 +263,4 @@ vllm*.log
 # External benchmark/reference repositories
 external/
 # Generated LeetCode Harbor tasks
-benchmarks/leetcode/qwen-tasks-v2/
+benchmarks/leetcode/tasks/

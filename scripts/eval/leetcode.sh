@@ -2,7 +2,7 @@
 # Use a fresh task output directory/job name for each generated benchmark version.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-TASKS="${TASKS:-benchmarks/leetcode/qwen-tasks-v2}"
+TASKS="${TASKS:-benchmarks/leetcode/tasks}"
 AGENT="${AGENT:-model}"
 JOB_NAME="${JOB_NAME:-leetcode-unified-$(date +%Y%m%d-%H%M%S)}"
 args=(run -p "$TASKS" -n "${N_CONCURRENT:-1}" --job-name "$JOB_NAME" -o jobs -y)
