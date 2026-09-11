@@ -542,11 +542,12 @@ def validate_dataset(
                 )
 
             for language in LANGUAGES:
-                interface = interfaces.get(
-                    language
-                )
-
-                if interface is None:
+                interface = interfaces.get(language)
+                if not isinstance(interface, dict):
+                    errors.append(
+                        f"{question_id} {task_id}: "
+                        f"missing {language} interface object"
+                    )
                     continue
 
                 language_counts[
