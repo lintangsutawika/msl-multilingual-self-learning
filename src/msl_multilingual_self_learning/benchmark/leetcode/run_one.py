@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .unified_tasks import build_prompt
+
 
 DEFAULT_DATASET = Path(
     "benchmarks/leetcode/data/leetcode_multilingual.jsonl"
@@ -44,34 +46,11 @@ def load_problem(
     )
 
 
-def format_entrypoint_requirement(language: str, interface: dict[str, Any]) -> str:
-    return (
-        f"Entrypoint: {interface['raw_signature'].strip()}\n"
-        f"Container: {interface.get('container') or '(none)'}"
-    )
-
-
-def build_prompt(record: dict[str, Any], language: str) -> str:
-    """One template for all languages; no starter code, examples of code, or tests."""
-    interface = record["interfaces"][language]
-    return (
-        f"Language: {language}\n"
-        f"{format_entrypoint_requirement(language, interface)}\n\n"
-        f"Problem:\n{record['problem_description'].strip()}\n\n"
-        "Solve the problem in the specified language using the required entrypoint. "
-        "Return a complete source file, including any required imports, includes, "
-        "and package declarations. Do not define a program entrypoint. "
-        "The source must compile or run as submitted. Do not include unused imports. "
-        "Return only source code, without Markdown fences or explanations."
-    )
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Load one LeetCode benchmark "
-            "problem and construct its "
-            "model prompt."
+            "Render the model prompt for one LeetCode "
+            "problem/language combination."
         )
     )
 
@@ -79,14 +58,20 @@ def parse_args() -> argparse.Namespace:
         "--dataset",
         type=Path,
         default=DEFAULT_DATASET,
+        help=(
+            f"Path to the multilingual JSONL dataset. "
+            f"Default: {DEFAULT_DATASET}"
+        ),
     )
-
     parser.add_argument(
         "--question-id",
         type=int,
         default=3243,
+        help=(
+            "LeetCode question ID to render. "
+            "Default: 3243"
+        ),
     )
-
     parser.add_argument(
         "--language",
         choices=(
@@ -96,6 +81,10 @@ def parse_args() -> argparse.Namespace:
             "java",
         ),
         default="python",
+        help=(
+            "Target language for the prompt. "
+            "Default: python"
+        ),
     )
 
     return parser.parse_args()
