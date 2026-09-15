@@ -7,8 +7,9 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from msl_multilingual_self_learning.agents.simple_code_agent import SimpleCodeAgent
-from msl_multilingual_self_learning.benchmark.leetcode.run_one import build_prompt, load_problem, DEFAULT_DATASET
-from msl_multilingual_self_learning.benchmark.leetcode.unified_tasks import generate, LANGUAGES
+from src.benchmarks.leetcode.adapter import LANGUAGES, generate
+from src.benchmarks.leetcode.dataset import DEFAULT_DATASET, load_problem
+from src.benchmarks.leetcode.prompt import build_prompt
 
 
 class PromptTests(unittest.TestCase):
@@ -30,9 +31,9 @@ class PromptTests(unittest.TestCase):
             self.assertEqual(len({(task / 'tests/canonical_test.py').read_bytes() for task in tasks}), 1)
             for task in tasks:
                 self.assertEqual({p.name for p in (task / 'tests').iterdir()},
-                                 {'test.py', 'canonical_test.py', 'config.json', 'test.sh'})
+                                 {'test.py', 'canonical_test.py', 'config.json', 'test.sh', '_package_submission.py'})
                 self.assertTrue(any((task / 'environment/files/adapters').iterdir()))
-                self.assertFalse(any((task / 'solution').iterdir()))
+                self.assertFalse((task / 'solution/solution.json').exists())
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):

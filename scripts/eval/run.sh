@@ -1,89 +1,80 @@
 #!/usr/bin/env bash
-# Minimal harbor launcher: mini-swe-agent on SWE-bench Multilingual (300 tasks).
+# Run mini-swe-agent on a local LeetCode task directory under Harbor + Singularity,
+# using config/leetcode.yaml for the agent prompts/model settings.
+#
+# Adapts the old one-shot (custom SimpleCodeAgent on benchmarks/leetcode/generated/cpp)
+# to the built-in mini-swe-agent and a local `-p` task path (e.g. a generated Python
+# dataset). mini-swe-agent consumes config/leetcode.yaml via the `config_file` agent
+# kwarg; the model is reached through your OpenAI-compatible server (vLLM), so only
+# OPENAI_BASE_URL/OPENAI_API_KEY are needed (no LANGUAGE/SOLUTION_FILE, which were
+# specific to SimpleCodeAgent).
 #
 # Usage:
-#   MODEL=openai/Qwen/Qwen3-Coder-30B-A3B-Instruct \
-#   MODEL_BASE_URL=http://localhost:8000/v1 MODEL_API_KEY=dummy \
-#   scripts/eval/run.sh
+#   scripts/eval/run_leetcode.sh [-p TASK_PATH] [--dry-run]
 #
-# The dataset id `swebench_multilingual` resolves against harbor's default registry
-# (hub.harborframework.com), 300 tasks, v1.0. Tasks are Dockerfile-defined
-# (FROM swebench/sweb.eval.x86_64.<instance>), so ENV=singularity relies on the
-# harbor-singularity-hpc environment (FROM fallback + writable rootfs); ENV=docker/modal
-# build the Dockerfile natively.
+#   -p TASK_PATH   local task or dataset directory (default: benchmarks/leetcode/
+#                  datasets/python/shortest-distance-after-road-addition-queries-i)
+#   --dry-run      print the resolved harbor JobConfig and exit (harbor --print-config)
+#
+# Knobs (env vars), mirroring scripts/eval/run.sh:
+#   MODEL            litellm model id to serve (default openai/Qwen/Qwen3.5-9B)
+#   MODEL_BASE_URL   OpenAI-compatible base URL (default http://127.0.0.1:46977/v1)
+#   MODEL_API_KEY    key for that server (default dummy)
+#   CONFIG_FILE      mini-swe-agent config yaml (default config/leetcode.yaml)
+#   JOB_NAME         harbor job name (default leetcode-<lang>-<timestamp>)
+#   JOBS_DIR         output directory (default jobs)
+#   N_CONCURRENT     parallel trials (default 1)
+#   AGENT_TIMEOUT_MULT  multiplier for task agent timeout (default 1.0; e.g. 12 -> 12x)
+#   QUIET              set to 1 to suppress harbor's live progress renderer (default 0)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-# --- knobs ----------------------------------------------------------------------
-DATASET="${DATASET:-swebench_multilingual}"
-MODEL="${MODEL:-}"                       # REQUIRED, e.g. openai/<served-name> or anthropic/claude-...
-MODEL_BASE_URL="${MODEL_BASE_URL:-}"     # set for an OpenAI-compatible server (vLLM); empty => native provider
-MODEL_API_KEY="${MODEL_API_KEY:-dummy}"  # key for that server / provider
-ENV="${ENV:-singularity}"                # singularity | docker | modal | ...
-N_CONCURRENT="${N_CONCURRENT:-4}"        # parallel trials
-N_TASKS="${N_TASKS:-}"                   # empty => all 300; set a small number to smoke-test
-JOB_NAME="${JOB_NAME:-msl-$(date +%Y%m%d-%H%M%S)}"
+TASK_PATH="${TASK_PATH:-benchmarks/leetcode/tasks}"
+MODEL="${MODEL:-openai/Qwen/Qwen3.5-9B}"
+MODEL_BASE_URL="${MODEL_BASE_URL:-http://127.0.0.1:8000/v1}"
+MODEL_API_KEY="${MODEL_API_KEY:-dummy}"
+CONFIG_FILE="${CONFIG_FILE:-config/leetcode.yaml}"
+JOB_NAME="${JOB_NAME:-leetcode-$(date +%Y%m%d-%H%M%S)}"
 JOBS_DIR="${JOBS_DIR:-jobs}"
+N_CONCURRENT="${N_CONCURRENT:-1}"
+DRY_RUN="${DRY_RUN:-0}"
+AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-1.0}"
+QUIET="${QUIET:-0}"
 
-# Singularity-only. Keep bind-paths mounted (so /etc/resolv.conf reaches the container
-# and in-container pip has DNS); only suppress home,tmp. Leave the cache empty for
-# node-local ($PBS_LOCALDIR/$SLURM_TMPDIR, resume-safe) or set a shared-FS path to persist.
-SINGULARITY_NO_MOUNT="${SINGULARITY_NO_MOUNT:-home,tmp}"
-SINGULARITY_CACHE_DIR="${SINGULARITY_CACHE_DIR:-}"
-SINGULARITY_ENV_IMPORT_PATH="${SINGULARITY_ENV_IMPORT_PATH:-harbor_singularity_hpc.environment:SingularityWritableEnvironment}"
+[ -d "${TASK_PATH}" ] || { echo "ERROR: task path not found: ${TASK_PATH}" >&2; exit 2; }
+[ -f "${CONFIG_FILE}" ] || { echo "ERROR: config file not found: ${CONFIG_FILE}" >&2; exit 2; }
 
-# mini-swe-agent needs Python >=3.11 (imports typing.NotRequired); many SWE-bench task
-# images ship 3.10/3.9, and harbor installs the agent with an unpinned `uv tool install`
-# against the image's system Python -> ImportError. Force a 3.11 interpreter for the agent
-# tool venv. Set MSWEA_UV_PYTHON="" to disable.
-MSWEA_UV_PYTHON="${MSWEA_UV_PYTHON:-3.11}"
-
-[ -n "${MODEL}" ] || { echo "ERROR: set MODEL (e.g. MODEL=openai/<name> with MODEL_BASE_URL, or MODEL=anthropic/claude-...)." >&2; exit 2; }
-
-# --- resolve harbor -------------------------------------------------------------
+# Resolve harbor. Prefer the project venv (.venv/bin/harbor): it carries the
+# harbor_singularity_hpc package (pinned in pyproject [tool.uv.sources]) needed by
+# `-e harbor_singularity_hpc...`, which the global `uv tool` harbor on PATH does NOT
+# have ("No module named 'harbor_singularity_hpc'"). Fall back to PATH/uv otherwise.
 if   [ -n "${HARBOR_BIN:-}" ];              then HARBOR_CMD=( "${HARBOR_BIN}" )
-elif command -v harbor >/dev/null 2>&1;     then HARBOR_CMD=( harbor )
 elif [ -x ".venv/bin/harbor" ];             then HARBOR_CMD=( .venv/bin/harbor )
+elif command -v harbor >/dev/null 2>&1;     then HARBOR_CMD=( harbor )
 elif command -v uv >/dev/null 2>&1;         then HARBOR_CMD=( uv run harbor )
 else echo "ERROR: harbor not found. Run: uv sync" >&2; exit 127; fi
 
-# --- assemble command -----------------------------------------------------------
 ARGS=(
     run
-    -d "${DATASET}"
-    -a mini-swe-agent
+    -p "${TASK_PATH}"
+    -a "mini-swe-agent"
     -m "${MODEL}"
+    -e "harbor_singularity_hpc.environment:SingularityWritableEnvironment"
+    --ek "singularity_no_mount=home,tmp"
+    --ak "config_file=${CONFIG_FILE}"
+    --ae "OPENAI_BASE_URL=${MODEL_BASE_URL}"
+    --ae "OPENAI_API_KEY=${MODEL_API_KEY}"
     -n "${N_CONCURRENT}"
     --job-name "${JOB_NAME}"
     -o "${JOBS_DIR}"
+    --agent-timeout-multiplier "${AGENT_TIMEOUT_MULT}"
     -y
 )
+[ "${QUIET}" = "1" ] && ARGS+=( --quiet )
+[ "${DRY_RUN}" = "1" ] && ARGS+=( --print-config )
 
-# Point the agent's litellm at the model endpoint (only when a base URL is given; for a
-# native provider like anthropic/, leave it and set that provider's key in your env).
-if [ -n "${MODEL_BASE_URL}" ]; then
-    ARGS+=(
-        --ae "OPENAI_BASE_URL=${MODEL_BASE_URL}"
-        --ae "OPENAI_API_KEY=${MODEL_API_KEY}"
-        --ae "MSWEA_API_KEY=${MODEL_API_KEY}"
-    )
-fi
-[ -n "${MSWEA_UV_PYTHON}" ] && ARGS+=( --ae "UV_PYTHON=${MSWEA_UV_PYTHON}" )
-[ -n "${N_TASKS}" ] && ARGS+=( -l "${N_TASKS}" )
-
-# Environment: singularity is our custom writable-rootfs class (harbor's -e enum can't
-# name a custom class), selected by import path; everything else uses -e.
-case "${ENV}" in
-    singularity*)
-        ARGS+=( --environment-import-path "${SINGULARITY_ENV_IMPORT_PATH}" )
-        ARGS+=( --ek "singularity_no_mount=${SINGULARITY_NO_MOUNT}" )
-        [ -n "${SINGULARITY_CACHE_DIR}" ] && ARGS+=( --ek "singularity_image_cache_dir=${SINGULARITY_CACHE_DIR}" )
-        ;;
-    *)
-        ARGS+=( -e "${ENV}" )
-        ;;
-esac
-
-echo "DATASET=${DATASET}  MODEL=${MODEL}  ENV=${ENV}  n=${N_CONCURRENT}  tasks=${N_TASKS:-all}"
+echo "task:  ${TASK_PATH}"
+echo "harbor: ${HARBOR_CMD[0]}"
+echo "model: ${MODEL}  base_url: ${MODEL_BASE_URL}  config: ${CONFIG_FILE}"
 echo "+ ${HARBOR_CMD[*]} ${ARGS[*]}"
 exec "${HARBOR_CMD[@]}" "${ARGS[@]}"

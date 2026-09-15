@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from msl_multilingual_self_learning.benchmark.leetcode.unified_tasks import generate
+from src.benchmarks.leetcode.adapter import generate
 
 
 class JudgeTests(unittest.TestCase):
