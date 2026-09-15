@@ -25,11 +25,12 @@
 #   TASKS            task/dataset path (default benchmarks/leetcode/tasks).
 #   N_TASKS          subset limit for a smoke run; empty = all.
 set -euo pipefail
-# Resolve the repo root from THIS script's location (<repo>/scripts/eval/...) so the
-# relative `scripts/eval/run_leetcode.sh` below always resolves, regardless of submit
-# dir (PBS_O_WORKDIR may point outside the repo on an interactive node).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
+# Under qsub, BASH_SOURCE[0] is the spooled script copy, so resolve the repo root
+# from PBS_O_WORKDIR/SLURM_SUBMIT_DIR (the submit dir = repo root); fall back to the
+# script's own location for interactive runs.
+if [ -n "${PBS_O_WORKDIR:-}" ]; then REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR}}"
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
+else SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"; fi
 cd "${REPO_ROOT}"
 if [ -n "${PBS_JOBID:-}" ] && [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p logs
