@@ -18,6 +18,7 @@ dependencies = [
     "harbor-singularity-hpc",
     "datasets",
     "vllm>=0.28.0",
+    "requests>=2.34.2",
 ]
 
 [tool.uv.sources]

@@ -7,15 +7,27 @@ from pathlib import Path
 from typing import Any
 
 from .dataset import load_test_split
-from .interfaces.resolve import resolve_interface
 from .interfaces.derive import parse_hf_python_signature
+from .interfaces.leetcode import (
+    LANGUAGE_SLUGS,
+    parse_leetcode_interface,
+)
 
 
 LANGUAGES = (
     "python",
     "cpp",
+    "rust",
+    "javascript",
+    "typescript",
     "go",
     "java",
+    "php",
+    "ruby",
+)
+
+LEETCODE_SNIPPET_CACHE = Path(
+    "benchmarks/leetcode/data/cache/leetcode_snippets"
 )
 
 DEFAULT_OUTPUT = Path(
@@ -208,37 +220,7 @@ def _return_type_appears_in_signature(
     )
 
 
-def _determine_type_source(
-    language: str,
-    interface: Any,
-) -> str:
-    raw_signature = interface.raw_signature
-
-    if not raw_signature:
-        return "unknown"
-
-    for parameter in interface.parameters:
-        if not _parameter_type_appears_in_signature(
-            language,
-            raw_signature,
-            parameter.name,
-            parameter.type,
-        ):
-            return "leetcode_starter"
-
-    if not _return_type_appears_in_signature(
-        language,
-        raw_signature,
-        interface.callable_name,
-        interface.return_type,
-    ):
-        return "leetcode_starter"
-
-    return "doocs"
-
-
 def _interface_to_dict(
-    language: str,
     interface: Any,
 ) -> dict[str, Any]:
     return {
@@ -250,44 +232,68 @@ def _interface_to_dict(
                 "name": parameter.name,
                 "type": parameter.type,
             }
-            for parameter
-            in interface.parameters
+            for parameter in interface.parameters
         ],
         "return_type": interface.return_type,
-        "signature_source": "doocs",
-        "type_source": _determine_type_source(
-            language,
-            interface,
-        ),
+        "signature_source": "leetcode/codeSnippets",
+        "type_source": "leetcode/codeSnippets",
     }
-
 
 def _resolve_all_interfaces(
     problem: Any,
 ) -> dict[str, Any] | None:
-    interfaces = {}
+    question_id = int(
+        _problem_value(
+            problem,
+            "question_id",
+        )
+    )
+
+    cache_path = (
+        LEETCODE_SNIPPET_CACHE
+        / f"{question_id}.json"
+    )
+
+    if not cache_path.exists():
+        return None
+
+    record = json.loads(
+        cache_path.read_text(
+            encoding="utf-8",
+        )
+    )
+
+    snippets = {
+        snippet["langSlug"]: snippet["code"]
+        for snippet in record["code_snippets"]
+    }
+
+    interfaces: dict[str, Any] = {}
 
     for language in LANGUAGES:
-        interface = resolve_interface(
-            problem,
-            language,
-        )
+        slug = LANGUAGE_SLUGS[language]
 
-        if interface.source != "doocs":
+        code = snippets.get(slug)
+
+        if not code:
             return None
 
-        if not interface.raw_signature:
+        interface = parse_leetcode_interface(
+            question_id,
+            language,
+            code,
+        )
+
+        if interface is None:
             return None
 
         interfaces[language] = (
             _interface_to_dict(
-                language,
                 interface,
             )
         )
 
     return interfaces
-
 
 def _build_record(
     problem: Any,
@@ -335,7 +341,7 @@ def _build_record(
                 "newfacade/LeetCodeDataset"
             ),
             "interface_source": (
-                "doocs/leetcode"
+                "leetcode/codeSnippets"
             ),
         },
     }
@@ -385,7 +391,7 @@ def generate_dataset(
 
     if not records:
         raise RuntimeError(
-            "No problems with complete Doocs interfaces were generated"
+            "No problems with complete LeetCode interfaces were generated"
         )
 
     # Only create/replace the output after generation
@@ -444,10 +450,9 @@ def generate_dataset(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate a multilingual LeetCode "
-            "benchmark using only problems with "
-            "native Doocs signatures for Python, "
-            "C++, Go, and Java."
+            "Generate a multilingual LeetCode benchmark "
+            "using official LeetCode codeSnippets "
+            "interfaces for all nine target languages."
         )
     )
 

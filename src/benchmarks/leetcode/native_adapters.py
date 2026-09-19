@@ -84,4 +84,166 @@ class Runner {{
     }}
 }}
 '''
+    if language == "rust":
+        declarations = "\n".join(
+            (
+                f"let arg{i}: {p['type']} = "
+                f"serde_json::from_value(args[{i}].clone())"
+                f".expect(\"failed to deserialize argument {i}\");"
+            )
+            for i, p in enumerate(params)
+        )
+
+        target = (
+            f"{container}::{call}"
+            if container
+            else call
+        )
+
+        return f'''use std::io::{{self, BufRead}};
+
+struct Solution;
+
+include!("solution.rs");
+
+fn main() {{
+    let stdin = io::stdin();
+
+    for line in stdin.lock().lines() {{
+        let line = line.expect("failed to read stdin");
+
+        if line.trim().is_empty() {{
+            continue;
+        }}
+
+        let args: Vec<serde_json::Value> =
+            serde_json::from_str(&line)
+                .expect("failed to parse arguments");
+
+        {declarations}
+
+        let result = {target}({names});
+
+        println!(
+            "{{}}",
+            serde_json::to_string(&result)
+                .expect("failed to serialize result")
+        );
+    }}
+}}
+'''
+    if language == "javascript":
+        return f'''const fs = require("fs");
+const readline = require("readline");
+const vm = require("vm");
+
+const solutionCode = fs.readFileSync("solution.js", "utf8");
+
+const context = {{}};
+vm.createContext(context);
+vm.runInContext(solutionCode, context);
+
+const target = context["{call}"];
+
+if (typeof target !== "function") {{
+    throw new Error("Expected function {call} was not defined");
+}}
+
+const rl = readline.createInterface({{
+    input: process.stdin,
+    crlfDelay: Infinity,
+}});
+
+rl.on("line", (line) => {{
+    if (!line.trim()) {{
+        return;
+    }}
+
+    const args = JSON.parse(line);
+    const result = target(...args);
+
+    process.stdout.write(
+        JSON.stringify(result) + "\\n"
+    );
+}});
+'''
+
+    if language == "typescript":
+        return f'''declare function require(name: string): any;
+declare const process: any;
+
+const readline = require("readline");
+const target: any = {call};
+
+const rl = readline.createInterface({{
+    input: process.stdin,
+    crlfDelay: Infinity,
+}});
+
+rl.on("line", (line: string) => {{
+    if (!line.trim()) {{
+        return;
+    }}
+
+    const args = JSON.parse(line);
+    const result = target(...args);
+
+    process.stdout.write(
+        JSON.stringify(result) + "\\n"
+    );
+}});
+'''
+    if language == "php":
+        if container:
+            target = (
+                f"$solver = new {container}();\n"
+                f"$result = $solver->{call}(...$args);"
+            )
+        else:
+            target = f"$result = {call}(...$args);"
+
+        return f'''<?php
+
+require_once "solution.php";
+
+while (($line = fgets(STDIN)) !== false) {{
+    $line = trim($line);
+
+    if ($line === "") {{
+        continue;
+    }}
+
+    $args = json_decode($line, true);
+
+    {target}
+
+    fwrite(STDOUT, json_encode($result) . PHP_EOL);
+}}
+'''
+    if language == "ruby":
+        if container:
+            target = (
+                f"solver = {container}.new\n"
+                f"result = solver.{call}(*args)"
+            )
+        else:
+            target = f"result = {call}(*args)"
+
+        return f'''require "json"
+require_relative "solution"
+
+STDOUT.sync = true
+
+while (line = STDIN.gets)
+  line = line.strip
+
+  next if line.empty?
+
+  args = JSON.parse(line)
+
+  {target}
+
+  STDOUT.puts(JSON.generate(result))
+end
+'''
     raise ValueError(language)

@@ -28,6 +28,9 @@
 #   QUIET              set to 1 to suppress harbor's live progress renderer (default 0)
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+# Keep uv's package cache off NFS/home. Babel /scratch is node-local.
+export UV_CACHE_DIR="${UV_CACHE_DIR:-/scratch/$USER/uv-cache}"
+mkdir -p "$UV_CACHE_DIR"
 
 TASK_PATH="${TASK_PATH:-benchmarks/leetcode/tasks}"
 MODEL="${MODEL:-openai/Qwen/Qwen3.5-9B}"

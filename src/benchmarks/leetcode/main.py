@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .adapter import LANGUAGES, generate_all
@@ -45,10 +46,25 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Also emit a reference solution/solution.json (needs Doocs checkout).")
     parser.add_argument("--skip-unsupported", action="store_true",
                         help="Record unsupported transports in exclusions.json instead of aborting.")
+    parser.add_argument(
+        "--image-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory containing leetcode-<language>.sif images. "
+            "Defaults to $LEETCODE_IMAGE_DIR when set."
+        ),
+    )
     parser.add_argument("--image-python", help="Prebuilt Singularity .sif for python tasks.")
     parser.add_argument("--image-cpp", help="Prebuilt Singularity .sif for cpp tasks.")
     parser.add_argument("--image-go", help="Prebuilt Singularity .sif for go tasks.")
     parser.add_argument("--image-java", help="Prebuilt Singularity .sif for java tasks.")
+    parser.add_argument("--image-rust", help="Prebuilt Singularity .sif for rust tasks.")
+    parser.add_argument("--image-javascript", help="Prebuilt Singularity .sif for javascript tasks.")
+    parser.add_argument("--image-typescript", help="Prebuilt Singularity .sif for typescript tasks.")
+    parser.add_argument("--image-php", help="Prebuilt Singularity .sif for php tasks.")
+    parser.add_argument("--image-ruby", help="Prebuilt Singularity .sif for ruby tasks.")
+
     return parser
 
 
@@ -72,11 +88,30 @@ def main() -> None:
         # Keep compatible: generator requires a fresh dir (previous behavior).
         raise SystemExit(f"Output directory already exists: {args.output_dir}. Use a fresh --output-dir.")
 
-    images = {
-        lang: getattr(args, f"image_{lang}")
-        for lang in LANGUAGES
-        if getattr(args, f"image_{lang}")
-    }
+    image_dir = args.image_dir
+    if image_dir is None:
+        env_image_dir = os.environ.get("LEETCODE_IMAGE_DIR")
+        if env_image_dir:
+            image_dir = Path(env_image_dir)
+
+    images: dict[str, str] = {}
+
+    for lang in LANGUAGES:
+        explicit = getattr(args, f"image_{lang}")
+
+        if explicit:
+            images[lang] = explicit
+            continue
+
+        if image_dir is not None:
+            image = image_dir / f"leetcode-{lang}.sif"
+
+            if not image.is_file():
+                raise SystemExit(
+                    f"Missing image for {lang}: {image}"
+                )
+
+            images[lang] = str(image)
 
     exclusions, count = generate_all(
         problems,
