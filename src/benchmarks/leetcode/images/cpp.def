@@ -1,0 +1,16 @@
+Bootstrap: docker
+From: ubuntu:24.04
+
+%post
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+        python3 \
+        g++ \
+        nlohmann-json3-dev \
+        ca-certificates
+    rm -rf /var/lib/apt/lists/*
+
+%test
+    python3 --version
+    g++ --version
+    test -f /usr/include/nlohmann/json.hpp

@@ -264,3 +264,15 @@ vllm*.log
 external/
 # Generated LeetCode Harbor tasks
 benchmarks/leetcode/tasks/
+
+# LeetCode generated artifacts
+benchmarks/leetcode/data/cache/
+benchmarks/leetcode/tasks-*/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+benchmarks/leetcode/data/interface_parse_failures.json
+
+# Weights & Biases local run data
+wandb/

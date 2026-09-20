@@ -17,18 +17,38 @@ from typing import Any
 
 from .native_adapters import render_worker
 
-LANGUAGES = ("python", "cpp", "go", "java")
+LANGUAGES = (
+    "python",
+    "cpp",
+    "go",
+    "java",
+    "rust",
+    "javascript",
+    "typescript",
+    "php",
+    "ruby",
+)
 OMITTED_QUESTIONS = {3319: "Omitted pending tree transport support"}
 SOURCE_FILES = {
     "python": "solution.py",
     "cpp": "solution.cpp",
     "go": "solution.go",
     "java": "Solution.java",
+    "rust": "solution.rs",
+    "javascript": "solution.js",
+    "typescript": "solution.ts",
+    "php": "solution.php",
+    "ruby": "solution.rb",
 }
 ADAPTERS = {
     "cpp": "runner.cpp",
     "go": "runner.go",
     "java": "Runner.java",
+    "rust": "runner.rs",
+    "javascript": "runner.js",
+    "php": "runner.php",
+    "typescript": "runner.ts",
+    "ruby": "runner.rb",
 }
 
 PKG = Path(__file__).parent
@@ -108,9 +128,26 @@ def generate(
         worker_tpl = (PKG / "task-template-python/environment/files/adapters/worker.tpl").read_text()
         (task / "environment/files/adapters/worker.py").write_text(worker_tpl.replace("TARGET", target))
     else:
-        filename = ADAPTERS[language]
-        (task / "environment/files/adapters" / filename).write_text(render_worker(problem, language))
+        adapter_dir = (
+            task
+            / "environment"
+            / "files"
+            / "adapters"
+        )
 
+        adapter_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        filename = ADAPTERS[language]
+
+        (adapter_dir / filename).write_text(
+            render_worker(
+                problem,
+                language,
+            )
+        )
     if with_oracle:
         from .interfaces.doocs import find_solution_file
         import re

@@ -14,8 +14,17 @@ WORKSPACE = Path(os.environ.get("LEETCODE_WORKSPACE", "/workspace"))
 TESTS = Path(__file__).parent
 ADAPTERS = Path(os.environ.get("LEETCODE_ADAPTERS", "/opt/leetcode"))
 LOGS = Path(os.environ.get("LEETCODE_LOGS", "/logs/verifier"))
-FILES = {"python": "solution.py", "cpp": "solution.cpp", "go": "solution.go", "java": "Solution.java"}
-
+FILES = {
+    "python": "solution.py",
+    "cpp": "solution.cpp",
+    "go": "solution.go",
+    "java": "Solution.java",
+    "rust": "solution.rs",
+    "javascript": "solution.js",
+    "typescript": "solution.ts",
+    "php": "solution.php",
+    "ruby": "solution.rb",
+}
 
 class CompileError(RuntimeError):
     pass
@@ -29,12 +38,62 @@ def prepare(language):
     if not isinstance(code, str) or not code.strip():
         raise ValueError("Submission must contain nonempty source code")
     (WORKSPACE / FILES[language]).write_text(code)
-    worker = ADAPTERS / {"python": "worker.py", "cpp": "runner.cpp", "go": "runner.go", "java": "Runner.java"}[language]
+    worker = ADAPTERS / {
+        "python": "worker.py",
+        "javascript": "runner.js",
+        "cpp": "runner.cpp",
+        "go": "runner.go",
+        "java": "Runner.java",
+        "rust": "runner.rs",
+        "typescript": "runner.ts",
+        "php": "runner.php",
+        "ruby": "runner.rb",
+    }[language]
     (WORKSPACE / worker.name).write_text(worker.read_text())
+    if language == "rust":
+        (WORKSPACE / "Cargo.toml").write_text(
+            """[package]
+    name = "leetcode_runner"
+    version = "0.1.0"
+    edition = "2021"
+
+    [[bin]]
+    name = "leetcode_runner"
+    path = "runner.rs"
+
+    [dependencies]
+    serde_json = "1"
+    """
+        )
+    if language == "typescript":
+        solution = (WORKSPACE / "solution.ts").read_text()
+        runner = (WORKSPACE / "runner.ts").read_text()
+
+        combined = WORKSPACE / "combined.ts"
+        combined.write_text(
+            solution
+            + "\n\n"
+            + runner
+        )
     commands = {
         "cpp": ["g++", "-std=c++17", "-O2", "runner.cpp", "-o", "runner"],
         "go": ["go", "build", "-o", "runner", "solution.go", "runner.go"],
         "java": ["javac", "-cp", "/usr/share/java/gson.jar", "Solution.java", "Runner.java"],
+        "rust": [
+            "cargo",
+            "build",
+            "--offline",
+            "--release",
+        ],
+        "typescript": [
+            "tsc",
+            "--target",
+            "ES2020",
+            "--module",
+            "commonjs",
+            "--skipLibCheck",
+            "combined.ts",
+        ],
     }
     if language in commands:
         result = subprocess.run(commands[language], cwd=WORKSPACE, capture_output=True, text=True, timeout=120)
@@ -46,6 +105,30 @@ def prepare(language):
         "cpp": [str(WORKSPACE / "runner")],
         "go": [str(WORKSPACE / "runner")],
         "java": ["java", "-cp", ".:/usr/share/java/gson.jar", "Runner"],
+        "rust": [
+            str(
+                WORKSPACE
+                / "target"
+                / "release"
+                / "leetcode_runner"
+            )
+        ],
+        "javascript": [
+            "node",
+            "runner.js",
+        ],
+        "typescript": [
+            "node",
+            "combined.js",
+        ],
+        "php": [
+            "php",
+            "runner.php",
+        ],
+        "ruby": [
+            "ruby",
+            "runner.rb",
+        ],
     }[language]
 
 

@@ -34,14 +34,20 @@ class SimpleCodeAgent(BaseAgent):
     ) -> str:
         text = text.strip()
 
-        match = re.fullmatch(
+        # Some models may emit a reasoning section even when thinking is
+        # disabled. Keep only the content after the final </think> marker.
+        if "</think>" in text:
+            text = text.rsplit("</think>", 1)[-1].strip()
+
+        # Prefer the final fenced code block when one is present.
+        fenced_blocks = re.findall(
             r"```(?:[A-Za-z0-9_+#.\-]+)?\s*\n(.*?)```",
             text,
             flags=re.DOTALL,
         )
 
-        if match is not None:
-            return match.group(1).strip()
+        if fenced_blocks:
+            return fenced_blocks[-1].strip()
 
         return text
 
@@ -57,13 +63,13 @@ class SimpleCodeAgent(BaseAgent):
             "LANGUAGE"
         )
 
-        match = re.match(r"Language: (python|cpp|go|java)\n", instruction)
+        match = re.match(r"Language: (python|cpp|go|java|rust|javascript|typescript|php|ruby)\n", instruction)
         if match is not None:
             task_language = match.group(1)
             if language is not None and language != task_language:
                 raise ValueError("LANGUAGE does not match the task prompt")
             language = task_language
-        if language not in {"python", "cpp", "go", "java"}:
+        if language not in {"python", "cpp", "go", "java", "rust", "javascript", "typescript", "php", "ruby"}:
             raise ValueError("Task must specify a supported language")
 
         base_url = (
@@ -107,6 +113,11 @@ class SimpleCodeAgent(BaseAgent):
             base_url=base_url,
         )
 
+        max_tokens = int(
+            self._get_env("MAX_TOKENS")
+            or "8192"
+        )
+
         response = await client.chat.completions.create(
             model=model_name,
             messages=[
@@ -125,7 +136,7 @@ class SimpleCodeAgent(BaseAgent):
                 },
             ],
             temperature=0,
-            max_tokens=8192,
+            max_tokens=max_tokens,
             extra_body={
                 "chat_template_kwargs": {
                     "enable_thinking": False,

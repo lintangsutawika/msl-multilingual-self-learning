@@ -40,66 +40,93 @@ Results land under `jobs/<job-name>/`.
 ## Multilingual LeetCode
 
 This repository also contains a multilingual LeetCode benchmark for evaluating
-the same coding problems across Python, C++, Go, and Java.
+the same coding problems across nine programming languages:
+* Python
+* C++
+* Go
+* Java
+* Rust
+* JavaScript
+* TypeScript
+* PHP
+* Ruby
 
-The benchmark uses:
+The benchmark uses official LeetCode `codeSnippets` metadata to define the
+language-specific function interfaces and a shared Harbor verifier to evaluate
+solutions across languages.
 
-* problem statements and canonical Python tests from
-  [`newfacade/LeetCodeDataset`](https://huggingface.co/datasets/newfacade/LeetCodeDataset)
-* native language-specific function entrypoints from
-  [Doocs LeetCode](https://github.com/doocs/leetcode)
-* one shared Python judging layer for all four languages
-* native execution adapters for Python, C++, Go, and Java
-* a common `solution.json` submission format so different agents can be
-  evaluated on the same Harbor tasks
+Generated Harbor task directories are not committed to Git. They should be
+regenerated locally from the committed execution dataset and split manifests.
 
-The strict multilingual intersection contains 182 problems. Problem 3319 is
-currently omitted because tree/object transport is not yet supported, leaving
-181 problems × 4 languages = 724 Harbor tasks.
+### Evaluation sets
+The benchmark defines three evaluation sets:
 
-### Generate the Harbor tasks
+* a1: all candidate problems supporting all 9 target languages (3079 problems; full execution dataset not prepared yet)
+* a2: all candidate problems supporting Python, C++, Go, and Java (3101 problems; full execution dataset not prepared yet)
+* b: a1 intersected with the newfacade/LeetCodeDataset test split (201 problems)
+Set B contains 201 selected problem IDs. Problem 3319 is currently excluded from runnable Harbor tasks because tree transport is not yet supported. This leaves 200 runnable problems across 9 languages, for a total of 1800 Harbor tasks.
 
-Generated Harbor tasks are not committed to Git. Regenerate them locally with:
+### Prepare Harbor tasks
+Prebuilt language-specific Singularity images can be supplied with:
 
 ```bash
-uv run python -m \
-  msl_multilingual_self_learning.benchmark.leetcode.unified_tasks \
-  --output benchmarks/leetcode/tasks \
+export LEETCODE_IMAGE_DIR=/path/to/msl-images
+```
+
+The directory should contain:
+
+```text
+leetcode-python.sif
+leetcode-cpp.sif
+leetcode-go.sif
+leetcode-java.sif
+leetcode-rust.sif
+leetcode-javascript.sif
+leetcode-typescript.sif
+leetcode-php.sif
+leetcode-ruby.sif
+```
+
+Prepare Set B with:
+
+```bash
+uv run python -m src.benchmarks.leetcode \
+  --set b \
   --skip-unsupported
 ```
 
-This creates one Harbor task per problem-language pair, for example:
+This writes the generated Harbor tasks to:
 
 ```text
-benchmarks/leetcode/tasks/
-├── 3243-python/
-├── 3243-cpp/
-├── 3243-go/
-├── 3243-java/
-└── ...
+benchmarks/leetcode/tasks-b/
 ```
 
-All agents should run against this same generated task set so they use the same
-problem statements, native entrypoints, and verifier.
+### SimpleCodeAgent
+The benchmark can be evaluated with the repository's `SimpleCodeAgent` through
+the standard evaluation script.
 
-### Run with SimpleCodeAgent and vLLM
-
-Start an OpenAI-compatible vLLM server separately. For example, if
-`Qwen/Qwen3.5-9B` is served at port 8000:
+For example:
 
 ```bash
-MODEL=Qwen/Qwen3.5-9B \
-MODEL_BASE_URL=http://127.0.0.1:8000/v1 \
-scripts/eval/leetcode.sh
+AGENT="msl_multilingual_self_learning.agents.simple_code_agent:SimpleCodeAgent" \
+MODEL="openai/Qwen3.5-9B" \
+MODEL_BASE_URL="http://127.0.0.1:8000/v1" \
+MODEL_API_KEY=dummy \
+TASK_PATH="benchmarks/leetcode/tasks-b" \
+scripts/eval/run.sh
 ```
 
-By default, `scripts/eval/leetcode.sh` uses:
+`MAX_TOKENS` controls the model completion limit:
 
-```text
-benchmarks/leetcode/tasks
+```bash
+MAX_TOKENS=8192
 ```
 
-and runs `SimpleCodeAgent`.
+and `AGENT_TIMEOUT_MULT` controls Harbor's agent timeout multiplier:
+
+```bash
+AGENT_TIMEOUT_MULT=1.0
+```
 
 `SimpleCodeAgent` requests source code from the model and writes a common
 submission format:
@@ -111,17 +138,7 @@ submission format:
 }
 ```
 
-The shared verifier reads this `solution.json`, executes the submitted source in
-the requested native language, and applies the original Python correctness
-tests.
-
-Compilation errors, runtime errors, wrong answers, and passing solutions are
-recorded as evaluation outcomes rather than repaired automatically.
-
-### Shared benchmark across agents
-
-The LeetCode benchmark is intended to be agent-independent.
-
+The verifier compiles or executes the submitted source in the requested language and applies the benchmark correctness tests. Compilation errors, runtime errors, wrong answers, and passing solutions are recorded as evaluation outcomes rather than repaired automatically.
 
 ## Knobs (env vars)
 
