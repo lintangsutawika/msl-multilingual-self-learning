@@ -1,12 +1,17 @@
 {
-  "name": "b2",
+  "name": "b",
   "count": 201,
-  "description": "A2 intersected with newfacade/LeetCodeDataset test split",
+  "description": "A1 intersected with newfacade/LeetCodeDataset test split",
   "languages": [
     "cpp",
     "golang",
     "java",
-    "python3"
+    "javascript",
+    "php",
+    "python3",
+    "ruby",
+    "rust",
+    "typescript"
   ],
   "questions": [
     {

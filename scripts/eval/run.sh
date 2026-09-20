@@ -43,6 +43,8 @@ N_CONCURRENT="${N_CONCURRENT:-1}"
 DRY_RUN="${DRY_RUN:-0}"
 AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-1.0}"
 QUIET="${QUIET:-0}"
+AGENT="${AGENT:-mini-swe-agent}"
+MAX_TOKENS="${MAX_TOKENS:-8192}"
 
 [ -d "${TASK_PATH}" ] || { echo "ERROR: task path not found: ${TASK_PATH}" >&2; exit 2; }
 [ -f "${CONFIG_FILE}" ] || { echo "ERROR: config file not found: ${CONFIG_FILE}" >&2; exit 2; }
@@ -60,13 +62,14 @@ else echo "ERROR: harbor not found. Run: uv sync" >&2; exit 127; fi
 ARGS=(
     run
     -p "${TASK_PATH}"
-    -a "mini-swe-agent"
+    -a "${AGENT}"
     -m "${MODEL}"
     -e "harbor_singularity_hpc.environment:SingularityWritableEnvironment"
     --ek "singularity_no_mount=home,tmp"
     --ak "config_file=${CONFIG_FILE}"
     --ae "OPENAI_BASE_URL=${MODEL_BASE_URL}"
     --ae "OPENAI_API_KEY=${MODEL_API_KEY}"
+    --ae "MAX_TOKENS=${MAX_TOKENS}"
     -n "${N_CONCURRENT}"
     --job-name "${JOB_NAME}"
     -o "${JOBS_DIR}"

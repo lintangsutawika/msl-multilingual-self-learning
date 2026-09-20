@@ -101,12 +101,10 @@ def build_splits() -> dict[str, set[int]]:
 
     hf_test_ids = load_hf_test_ids()
 
-    b1 = a1 & hf_test_ids
-    b2 = a2 & hf_test_ids
+    b = a1 & hf_test_ids
 
     return {
         "a1": a1,
         "a2": a2,
-        "b1": b1,
-        "b2": b2,
+        "b": b,
     }

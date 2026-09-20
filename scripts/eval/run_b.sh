@@ -14,6 +14,6 @@ mkdir -p \
   "$APPTAINER_TMPDIR" \
   "$APPTAINER_CACHEDIR"
 
-export TASK_PATH="${TASK_PATH:-benchmarks/leetcode/tasks-b1}"
+export TASK_PATH="${TASK_PATH:-benchmarks/leetcode/tasks-b}"
 
 exec scripts/eval/run.sh "$@"
