@@ -66,14 +66,27 @@ The benchmark defines three evaluation sets:
 * b: a1 intersected with the newfacade/LeetCodeDataset test split (201 problems)
 Set B contains 201 selected problem IDs. Problem 3319 is currently excluded from runnable Harbor tasks because tree transport is not yet supported. This leaves 200 runnable problems across 9 languages, for a total of 1800 Harbor tasks.
 
-### Prepare Harbor tasks
-Prebuilt language-specific Singularity images can be supplied with:
+### Building the LeetCode container images
+Each language uses its own Apptainer/Singularity image. The image
+definitions are stored in:
 
-```bash
-export LEETCODE_IMAGE_DIR=/path/to/msl-images
+```text
+src/benchmarks/leetcode/images/
 ```
 
-The directory should contain:
+Build all nine language images with:
+
+```bash
+scripts/build/build_leetcode_images.sh
+```
+
+By default, the resulting SIF files are written to:
+
+```text
+/data/user_data/$USER/msl-images/
+```
+
+This produces:
 
 ```text
 leetcode-python.sif
@@ -87,6 +100,22 @@ leetcode-php.sif
 leetcode-ruby.sif
 ```
 
+To store the images somewhere else, set `LEETCODE_IMAGE_DIR`:
+
+```bash
+LEETCODE_IMAGE_DIR=/path/to/images \
+scripts/build/build_leetcode_images.sh
+```
+
+Use the same `LEETCODE_IMAGE_DIR` when running the benchmark:
+
+```bash
+LEETCODE_IMAGE_DIR=/path/to/images \
+scripts/eval/run_b.sh
+```
+
+
+### Prepare Harbor tasks
 Prepare Set B with:
 
 ```bash
