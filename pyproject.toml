@@ -29,7 +29,7 @@ dependencies = [
 harbor = { git = "https://github.com/harbor-framework/harbor.git", rev = "c178c20710c362ef806c5d5d18852f95b21ca34b" }
 # The Singularity-on-HPC environment, pinned to an exact commit (its overrides track
 # harbor's internals, so pin them together and bump both deliberately).
-harbor-singularity-hpc = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git", rev = "91d6a3315770c51b846c782ef88488203bb27854" }
+harbor-singularity-hpc = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git", rev = "096be828a1acfe05e278a738e931affd056fb583" }
 
 [build-system]
 requires = ["hatchling"]
