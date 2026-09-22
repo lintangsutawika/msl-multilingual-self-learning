@@ -19,18 +19,36 @@
 #   TENSOR_PARALLEL  TP (default 1); DATA_PARALLEL DP (default 1).
 #   MAX_MODEL_LEN    context length (default 131072).
 #   GPU_MEM_UTIL     gpu-memory-utilization (default 0.85).
-#   HF_HOME_BIND     host dir bound as container HF cache (default ~/.cache/huggingface).
+#   CACHE_DIR        single host dir for ALL container caches, bound at /cache
+#                    (HF models, vLLM compile cache, tmp). Default ${BASE_DIR}/.cache.
 #   BASE_DIR         host base dir for container scratch/tmp (default ${PBS_LOCALDIR:-${TMPDIR:-/tmp}}).
 #   N_CONCURRENT     passed to run_leetcode.sh (default 32).
 #   TASKS            task/dataset path (default benchmarks/leetcode/tasks).
 #   N_TASKS          subset limit for a smoke run; empty = all.
 set -euo pipefail
-# Under qsub, BASH_SOURCE[0] is the spooled script copy, so resolve the repo root
-# from PBS_O_WORKDIR/SLURM_SUBMIT_DIR (the submit dir = repo root); fall back to the
-# script's own location for interactive runs.
-if [ -n "${PBS_O_WORKDIR:-}" ]; then REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR}}"
-elif [ -n "${SLURM_SUBMIT_DIR:-}" ]; then REPO_ROOT="${REPO_ROOT:-${SLURM_SUBMIT_DIR}}"
-else SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"; fi
+# Resolve the repo root. Under qsub, BASH_SOURCE[0] is the spooled script copy and
+# PBS_O_WORKDIR is the submit dir -- which is $HOME if qsub was run outside the repo,
+# so trust it ONLY when it actually contains this project (scripts/eval/run.sh).
+# Otherwise derive from the script's own location (works for interactive runs too).
+# Walk up from the submit dir (or CWD) to the dir that actually contains this project
+# (marked by scripts/eval/run.sh). This is robust regardless of where qsub was run from
+# (PBS_O_WORKDIR is $HOME if qsub ran outside the repo) and of BASH_SOURCE[] being the
+# spooled copy under qsub. An explicit REPO_ROOT env still wins.
+resolve_repo_root() {
+    local start
+    start="${PBS_O_WORKDIR:-${SLURM_SUBMIT_DIR:-$PWD}}"
+    local dir="${start}"
+    while [ -n "${dir}" ] && [ "${dir}" != "/" ]; do
+        if [ -x "${dir}/scripts/eval/run.sh" ]; then
+            echo "${dir}"; return
+        fi
+        dir="$(dirname "${dir}")"
+    done
+    # Last resort: known repo location for this user.
+    [ -x "${HOME}/msl-multilingual-self-learning/scripts/eval/run.sh" ] \
+        && echo "${HOME}/msl-multilingual-self-learning"
+}
+REPO_ROOT="${REPO_ROOT:-$(resolve_repo_root)}"
 cd "${REPO_ROOT}"
 if [ -n "${PBS_JOBID:-}" ] && [ -z "${SLURM_JOB_ID:-}" ]; then
     mkdir -p logs
@@ -47,12 +65,12 @@ TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 DATA_PARALLEL="${DATA_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
-HF_HOME_BIND="${HF_HOME_BIND:-${HOME}/.cache/huggingface}"
 BASE_DIR="${BASE_DIR:-${PBS_LOCALDIR:-${TMPDIR:-/tmp}}}"
+CACHE_DIR="${CACHE_DIR:-${BASE_DIR}/.cache}"
 N_CONCURRENT="${N_CONCURRENT:-32}"
 TASKS="${TASKS:-benchmarks/leetcode/tasks}"
 # Default job name: <dataset>--<model>, with any / in the model replaced by --.
-DATASET_NAME="$(basename "${TASKS}")"
+DATASET_NAME="${TASKS////---}"
 DEFAULT_JOB="${DATASET_NAME}--${MODEL//\//--}"
 export JOB_NAME="${JOB_NAME:-${DEFAULT_JOB}}"
 
@@ -80,14 +98,16 @@ case "${CUDA_VISIBLE_DEVICES:-}" in
 esac
 
 echo "[serve] launching vLLM ${MODEL} on 0.0.0.0:${VLLM_PORT} (TP=${TENSOR_PARALLEL} DP=${DATA_PARALLEL})"
-mkdir -p "${HF_HOME_BIND}" "${BASE_DIR}/tmp"
+mkdir -p "${CACHE_DIR}"
 export APPTAINER_TMPDIR="${BASE_DIR}" SINGULARITY_TMPDIR="${BASE_DIR}"
+# One host cache dir (node-local scratch, not quota-limited HOME) bound at /cache; all of
+# HF models, vLLM's torch_compile_cache, and tmp live under it so nothing touches HOME.
 "${APPTAINER_BIN}" exec --nv --writable-tmpfs \
     --workdir "${BASE_DIR}" \
-    --bind "${HF_HOME_BIND}:/root/.cache/huggingface" \
-    --bind "${BASE_DIR}/tmp:/tmp_work" \
-    --env TMPDIR=/tmp_work \
-    --env HF_HOME=/root/.cache/huggingface \
+    --bind "${CACHE_DIR}:/cache" \
+    --env TMPDIR=/cache/tmp \
+    --env HF_HOME=/cache/huggingface \
+    --env VLLM_CACHE_ROOT=/cache/vllm \
     --env "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}" \
     "${VLLM_CUDA_SIF}" \
     vllm serve "${MODEL}" \
@@ -116,7 +136,7 @@ done
 [ "${READY}" = "1" ] || { echo "ERROR: server not ready after $((SERVE_READY_TRIES * 5))s" >&2; exit 1; }
 echo "[serve] ready."
 
-echo "[eval] launching run_leetcode.sh (tasks=${TASKS} n=${N_CONCURRENT})"
+echo "[eval] launching run.sh (tasks=${TASKS} n=${N_CONCURRENT})"
 export MODEL="litellm_proxy/${MODEL}"
 export MODEL_BASE_URL="http://127.0.0.1:${VLLM_PORT}/v1"
 export MODEL_API_KEY="EMPTY"
