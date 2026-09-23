@@ -16,7 +16,10 @@
 #   MODEL            litellm model id to serve (default openai/Qwen/Qwen3.5-9B)
 #   MODEL_BASE_URL   OpenAI-compatible base URL (default http://127.0.0.1:8000/v1)
 #   MODEL_API_KEY    key for that server (default dummy)
-#   CONFIG_FILE      mini-swe-agent config yaml (default config/leetcode.yaml)
+#   CONFIG_FILE      mini-swe-agent config yaml (default config/leetcode.yaml; a
+#                     per-model configs/sampling/<repo>.yaml is auto-selected by
+#                     MODEL when present, e.g. MODEL=Qwen/Qwen3.5-9B ->
+#                     configs/sampling/Qwen/Qwen3.5-9B.yaml).
 #   JOB_NAME         harbor job name (default leetcode-<lang>-<timestamp>)
 #   JOBS_DIR         output directory (default jobs)
 #   N_CONCURRENT     parallel trials (default 1)
@@ -42,7 +45,16 @@ TASK_PATH="${TASK_PATH:-benchmarks/leetcode/tasks}"
 MODEL="${MODEL:-openai/Qwen/Qwen3.5-9B}"
 MODEL_BASE_URL="${MODEL_BASE_URL:-http://127.0.0.1:8000/v1}"
 MODEL_API_KEY="${MODEL_API_KEY:-dummy}"
-CONFIG_FILE="${CONFIG_FILE:-config/leetcode.yaml}"
+# Bare HF repo (strip a litellm provider prefix like openai/ or litellm_proxy/),
+# so per-model sampling configs resolve by the real repo path.
+_MODEL_BARE="${MODEL#openai/}"
+_MODEL_BARE="${_MODEL_BARE#litellm_proxy/}"
+# Per-model sampling config: configs/sampling/<repo>.yaml wins when present;
+# else fall back to config/leetcode.yaml. An explicit CONFIG_FILE always wins.
+if [ -z "${CONFIG_FILE:-}" ] && [ -f "configs/sampling/${_MODEL_BARE}.yaml" ]; then
+    CONFIG_FILE="configs/sampling/${_MODEL_BARE}.yaml"
+fi
+CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode.yaml}"
 JOB_NAME="${JOB_NAME:-leetcode-$(date +%Y%m%d-%H%M%S)}"
 JOBS_DIR="${JOBS_DIR:-jobs}"
 N_CONCURRENT="${N_CONCURRENT:-1}"
