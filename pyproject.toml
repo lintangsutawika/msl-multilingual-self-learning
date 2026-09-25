@@ -19,6 +19,7 @@ dependencies = [
     "datasets",
     "vllm>=0.28.0",
     "requests>=2.34.2",
+    "wandb>=0.30.0",
 ]
 
 [tool.uv.sources]

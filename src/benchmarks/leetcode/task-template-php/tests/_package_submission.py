@@ -13,7 +13,7 @@ WORKSPACE = Path(
 )
 
 LANGUAGE = "javascript"
-SOURCE_FILE = "solution.js"
+SOURCE_FILE = "solution.php"
 TARGET = WORKSPACE / "solution.json"
 
 if TARGET.exists():
