@@ -18,6 +18,8 @@
 #   VLLM_PORT        serve port (default 8000).
 #   TENSOR_PARALLEL  TP (default 1); DATA_PARALLEL DP (default 1).
 #   MAX_MODEL_LEN    context length (default 131072).
+#   VLLM_EXTRA_ARGS  extra vLLM flags; auto-loaded from configs/serve/<MODEL>.json
+#                    when VLLM_SERVE_CONFIG_MODE is on (or SERVE_CONFIG given).
 #   GPU_MEM_UTIL     gpu-memory-utilization (default 0.85).
 #   CACHE_DIR        single host dir for ALL container caches, bound at /cache
 #                    (HF models, vLLM compile cache, tmp). Default ${BASE_DIR}/.cache.
@@ -65,6 +67,7 @@ TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
 DATA_PARALLEL="${DATA_PARALLEL:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
+SERVE_CONFIG="${SERVE_CONFIG:-configs/serve/${MODEL}.json}"
 BASE_DIR="${BASE_DIR:-${PBS_LOCALDIR:-${TMPDIR:-/tmp}}}"
 CACHE_DIR="${CACHE_DIR:-${BASE_DIR}/.cache}"
 N_CONCURRENT="${N_CONCURRENT:-32}"
@@ -89,38 +92,18 @@ cleanup() {
 }
 trap cleanup EXIT SIGTERM SIGINT
 
-# ABCI/PBS can hand GPUs as UUIDs; vLLM needs integer indices.
-case "${CUDA_VISIBLE_DEVICES:-}" in
-    *[!0-9,]*)
-        _NGPU=$(printf '%s' "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | grep -c .)
-        export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((_NGPU - 1)))"
-        echo "[serve] normalized CUDA_VISIBLE_DEVICES -> ${CUDA_VISIBLE_DEVICES}" ;;
-esac
-
-echo "[serve] launching vLLM ${MODEL} on 0.0.0.0:${VLLM_PORT} (TP=${TENSOR_PARALLEL} DP=${DATA_PARALLEL})"
-mkdir -p "${CACHE_DIR}"
-export APPTAINER_TMPDIR="${BASE_DIR}" SINGULARITY_TMPDIR="${BASE_DIR}"
-# One host cache dir (node-local scratch, not quota-limited HOME) bound at /cache; all of
-# HF models, vLLM's torch_compile_cache, and tmp live under it so nothing touches HOME.
-"${APPTAINER_BIN}" exec --nv --writable-tmpfs \
-    --workdir "${BASE_DIR}" \
-    --bind "${CACHE_DIR}:/cache" \
-    --env TMPDIR=/cache/tmp \
-    --env HF_HOME=/cache/huggingface \
-    --env VLLM_CACHE_ROOT=/cache/vllm \
-    --env "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}" \
-    "${VLLM_CUDA_SIF}" \
-    vllm serve "${MODEL}" \
-        --host 0.0.0.0 \
-        --port "${VLLM_PORT}" \
-        --tensor-parallel-size "${TENSOR_PARALLEL}" \
-        --data-parallel-size "${DATA_PARALLEL}" \
-        --max-model-len "${MAX_MODEL_LEN}" \
-        --gpu-memory-utilization "${GPU_MEM_UTIL}" \
-        --enable-auto-tool-choice \
-        --tool-call-parser qwen3_coder \
-        >> "logs/vllm.log" 2>&1 &
-VLLM_PID=$!
+# --- serve vLLM (delegated to scripts/serve/serve_vllm.sh) ---------------------
+# The serve script owns the per-model serve-arg loading (configs/serve/<MODEL>.json),
+# node-local cache wiring, the apptainer exec, and backgrounding; it prints the vLLM
+# PID on stdout. This batch owns readiness checks and cleanup (see VLLM_PID below).
+export VLLM_CUDA_SIF MODEL VLLM_PORT TENSOR_PARALLEL DATA_PARALLEL \
+       MAX_MODEL_LEN GPU_MEM_UTIL BASE_DIR CACHE_DIR SERVE_CONFIG \
+       VLLM_EXTRA_ARGS CUDA_VISIBLE_DEVICES APPTAINER_BIN
+VLLM_LOG="${VLLM_LOG:-logs/vllm.log}"
+export VLLM_LOG
+VLLM_PID="$(bash scripts/serve/serve_vllm.sh)"
+[ -n "${VLLM_PID}" ] || { echo "ERROR: serve_vllm.sh produced no PID" >&2; exit 1; }
+echo "[serve] vLLM running (pid=${VLLM_PID}); log: ${VLLM_LOG}"
 
 echo "[serve] waiting for /health on :${VLLM_PORT} (up to $((SERVE_READY_TRIES * 5))s) ..."
 READY=0
