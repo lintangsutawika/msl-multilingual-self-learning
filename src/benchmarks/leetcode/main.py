@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 
 from .adapter import LANGUAGES, generate_all
@@ -186,6 +187,22 @@ def build_parser() -> argparse.ArgumentParser:
             help=f"Prebuilt Singularity .sif for {lang} tasks.",
         )
 
+    parser.add_argument(
+        "--prebuild-sif",
+        action="store_true",
+        help=(
+            "Build a Singularity sif from each language template's "
+            "environment/Dockerfile into the output dir and set it as "
+            "task.toml [environment].docker_image (overrides --image-dir)."
+        ),
+    )
+    parser.add_argument(
+        "--prebuild-dir",
+        type=Path,
+        default=None,
+        help="Where prebuilt sifs are written (default: the task output dir).",
+    )
+
     return parser
 
 
@@ -306,6 +323,34 @@ def main() -> None:
 
             images[lang] = str(image)
 
+    # --prebuild-sif: build one sif per included language from its template
+    # Dockerfile, and point task.toml [environment].docker_image at it (saved
+    # into the output dir next to the generated tasks).
+    if args.prebuild_sif:
+        from .adapter import prebuild_language_sifs
+
+        prebuild_dir = args.prebuild_dir or output_dir
+
+        # generate_all atomically renames a staged dir into output_dir, so the
+        # sifs cannot live there yet. Build them into a sibling scratch dir,
+        # then move them in AFTER generation succeeds.
+        scratch = output_dir.parent / f".{output_dir.name}.prebuild"
+        scratch.mkdir(parents=True, exist_ok=True)
+        try:
+            prebuilt_scratch = prebuild_language_sifs(
+                languages, scratch,
+            )
+            # Final sif lives alongside the tasks; task.toml references the
+            # absolute final path (so it is correct after the move below).
+            final_sifs = {
+                lang: str(output_dir / f"{lang}.sif")
+                for lang in prebuilt_scratch
+            }
+            for lang, sif in final_sifs.items():
+                images.setdefault(lang, sif)
+        except Exception:
+            raise
+
     exclusions, count = generate_all(
         problems,
         output=output_dir,
@@ -314,6 +359,16 @@ def main() -> None:
         with_oracle=args.with_oracle,
         skip_unsupported=args.skip_unsupported,
     )
+
+    # Move prebuilt sifs into the task dir now that generation succeeded.
+    if args.prebuild_sif:
+        scratch = output_dir.parent / f".{output_dir.name}.prebuild"
+        for lang in prebuilt_scratch:
+            src = scratch / f"{lang}.sif"
+            dst = output_dir / f"{lang}.sif"
+            if src.exists():
+                shutil.move(str(src), str(dst))
+        shutil.rmtree(scratch, ignore_errors=True)
 
     print(
         f"Generated {count} tasks in {output_dir}; "
