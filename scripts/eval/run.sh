@@ -20,10 +20,15 @@
 #                     per-model configs/sampling/<repo>.yaml is auto-selected by
 #                     MODEL when present, e.g. MODEL=Qwen/Qwen3.5-9B ->
 #                     configs/sampling/Qwen/Qwen3.5-9B.yaml).
-#   JOB_NAME         harbor job name (default leetcode-<lang>-<timestamp>)
+#   JOB_NAME         harbor job name (default <dataset>_<model>-run-<RUN>; deterministic
+#                     so resume works across chunks AND RUN=0,1,... gives repeat runs).
 #   JOBS_DIR         output directory (default jobs)
 #   N_CONCURRENT     parallel trials (default 1)
 #   AGENT_TIMEOUT_MULT  multiplier for task agent timeout (default 1.0; e.g. 12 -> 12x)
+#   MEMORY_MB           per-task container memory cap in MB, passed as
+#                       --ek override_memory_mb (raises the watch/kill limit for
+#                       big models; default = task.toml memory_mb, e.g. 16384).
+#   MEMORY_ENFORCEMENT  memory watchdog policy (--ek memory_enforcement_policy).
 #   QUIET              set to 1 to suppress harbor's live progress renderer (default 0)
 #
 # Resume (from the tts-tokens-that-suffice harness):
@@ -37,8 +42,11 @@
 #                      explicitly if you set it.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-# Keep uv's package cache off NFS/home. Babel /scratch is node-local.
-export UV_CACHE_DIR="${UV_CACHE_DIR:-/scratch/$USER/uv-cache}"
+# Keep uv's package cache off NFS/home. Prefer XDG_CACHE_HOME (set in .env to the
+# node-local PBS_LOCALDIR); fall back to /tmp when unset (e.g. a login shell). Never
+# use /scratch -- it does not exist on ABCI.
+CACHE_ROOT="${XDG_CACHE_HOME:-/tmp}"
+export UV_CACHE_DIR="${UV_CACHE_DIR:-${CACHE_ROOT}/uv-cache}"
 mkdir -p "$UV_CACHE_DIR"
 
 TASK_PATH="${TASK_PATH:-benchmarks/leetcode/tasks}"
@@ -55,7 +63,12 @@ if [ -z "${CONFIG_FILE:-}" ] && [ -f "configs/sampling/${_MODEL_BARE}.yaml" ]; t
     CONFIG_FILE="configs/sampling/${_MODEL_BARE}.yaml"
 fi
 CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode.yaml}"
-JOB_NAME="${JOB_NAME:-leetcode-$(date +%Y%m%d-%H%M%S)}"
+# Deterministic JOB_NAME so a resume works across walltime chunks AND RUN=0,1,2,...
+# gives repeat (non-colliding) runs of the same data+model. Derived from TASK_PATH
+# (dataset slug = its dir name) + MODEL (bare, / -> --). Set JOB_NAME to override.
+RUN="${RUN:-0}"
+_DATASET_SLUG="$(basename "${TASK_PATH%/}")"
+JOB_NAME="${JOB_NAME:-${_DATASET_SLUG}_${_MODEL_BARE//\//--}-run-${RUN}}"
 JOBS_DIR="${JOBS_DIR:-jobs}"
 N_CONCURRENT="${N_CONCURRENT:-1}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -63,6 +76,8 @@ AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-1.0}"
 QUIET="${QUIET:-0}"
 AGENT="${AGENT:-mini-swe-agent}"
 MAX_TOKENS="${MAX_TOKENS:-8192}"
+MEMORY_MB="${MEMORY_MB:-}"
+MEMORY_ENFORCEMENT="${MEMORY_ENFORCEMENT:-}"
 RESUME="${RESUME:-auto}"
 RESUME_FILTER_ERRORS="${RESUME_FILTER_ERRORS:-}"
 
@@ -115,6 +130,8 @@ ARGS=(
     --agent-timeout-multiplier "${AGENT_TIMEOUT_MULT}"
     -y
 )
+[ -n "${MEMORY_MB}" ] && ARGS+=( --ek "override_memory_mb=${MEMORY_MB}" )
+[ -n "${MEMORY_ENFORCEMENT}" ] && ARGS+=( --ek "memory_enforcement_policy=${MEMORY_ENFORCEMENT}" )
 [ "${QUIET}" = "1" ] && ARGS+=( --quiet )
 [ "${DRY_RUN}" = "1" ] && ARGS+=( --print-config )
 
