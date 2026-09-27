@@ -39,6 +39,10 @@ LANGUAGES = (
     "ruby",
 )
 
+DATASET_NAME = "newfacade/LeetCodeDataset"
+# Our hosted, post-interface dataset on HF (pushed from benchmarks/leetcode/hf_dataset).
+NEULAB_HF_DATASET = "neulab/leetcode"
+
 LEETCODE_SNIPPET_CACHE = Path(
     "benchmarks/leetcode/data/cache/leetcode_snippets"
 )
@@ -417,14 +421,55 @@ def _build_record(
     }
 
 
+def _flatten_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Expand nested problem-records (interfaces={lang: interface}) into one row
+    per (problem, language): each row has a single `language` + `interface`."""
+    flat: list[dict[str, Any]] = []
+    for rec in records:
+        interfaces = rec.get("interfaces") or {}
+        for language, interface in interfaces.items():
+            row = dict(rec)
+            row.pop("interfaces", None)
+            row["language"] = language
+            row["interface"] = interface
+            flat.append(row)
+    return flat
+
+
+def load_problems_from_hf_repo(
+    split: str = "test",
+) -> list[dict[str, Any]] | None:
+    """Return problem rows from the hosted neulab/leetcode dataset (post-interface).
+
+    This is the fast path: no GraphQL, no snippet cache, no interface parsing -- the
+    rows were already built by benchmarks/leetcode/hf_dataset/build_leetcode_dataset.py
+    and pushed to HF. Returns None if the hosted dataset is not (yet) available, so
+    callers can fall back to the live build.
+    """
+    try:
+        ds = load_dataset(NEULAB_HF_DATASET, split=split)
+    except Exception:
+        return None
+    return [dict(row) for row in ds]
+
+
 def load_problems_hf(
     split: str = "test",
 ) -> list[dict[str, Any]]:
     """Return problem rows for a LeetCode split (test | train).
 
-    Mirrors the old generate_dataset output schema so main.py can consume it
-    directly (no committed JSONL). Empty if the snippets cache is unpopulated.
+    Prefers the hosted neulab/leetcode dataset (post-interface); falls back to a live
+    build (HF newfacade/LeetCodeDataset + LeetCode codeSnippets) only when the hosted
+    dataset isn't available yet. Mirrors the old generate_dataset output schema.
     """
+    hosted = load_problems_from_hf_repo(split)
+    if hosted is not None:
+        # Hosted may be the old nested layout (interfaces={lang:...}) or the new flat
+        # per-(problem, language) layout; flatten to per-(problem, language) rows either way.
+        if hosted and "interfaces" in hosted[0]:
+            return _flatten_rows(hosted)
+        return hosted
+
     if split == "train":
         problems = load_train_split()
     else:
@@ -467,8 +512,9 @@ def load_problems_hf(
             "No problems with complete LeetCode interfaces were generated"
         )
 
-    return records
+    return _flatten_rows(records)
 
+@dataclass
 class LeetCodeProblem:
     task_id: str
     question_id: int

@@ -241,25 +241,25 @@ def prebuild_language_sifs(
     return images
 
 def generate(
-    problem: dict[str, Any],
-    language: str,
+    row: dict[str, Any],
     output: Path,
     docker_image: str | None = None,
     with_oracle: bool = False,
 ) -> Path:
-    """Render one task for (problem, language) into a fresh subdir of output."""
-    interface = problem["interfaces"][language]
+    """Render one task from a flat (problem, language) row into a fresh subdir."""
+    language = row["language"]
+    interface = row["interface"]
     all_types = [p["type"] for p in interface["parameters"]] + [interface["return_type"]]
     if any(any(t in value for t in ("TreeNode", "ListNode", "Node")) for value in all_types):
         raise NotImplementedError("Object transport is not supported yet")
     if interface["return_type"] in ("void", "None", "NoneType", ""):
         raise NotImplementedError("In-place/void outputs require mutation transport")
 
-    names = canonical_names(problem)
+    names = canonical_names(row)
     if len(names) != len(interface["parameters"]):
         raise ValueError("Canonical/native parameter counts differ")
 
-    task = output / f"{problem['question_id']}-{language}"
+    task = output / f"{row['question_id']}-{language}"
     if task.exists():
         raise FileExistsError(f"Use a fresh output directory: {task}")
 
@@ -292,21 +292,20 @@ def generate(
     container = interface.get("container") or "(none)"
     source_file = SOURCE_FILES[language]
     fills = {
-        "question_id": problem["question_id"],
+        "question_id": row["question_id"],
         "language": language,
         "docker_image": str(Path(docker_image).resolve()) if docker_image else "",
         "entrypoint": interface["raw_signature"].strip(),
         "container": container,
-        "problem": problem["problem_description"].strip(),
+        "problem": row["problem_description"].strip(),
         "source_file": source_file,
     }
     _fill(task / "task.toml", **fills)
     _fill(task / "instruction.md", **fills)
 
     # Problem-specific verifier artifacts.
-    (task / "tests/test.py").write_text((PKG / "judge_runtime.py").read_text())
     (task / "tests/config.json").write_text(json.dumps({"language": language, "parameter_names": names}))
-    (task / "tests/canonical_test.py").write_text(problem["canonical_tests"]["source"])
+    (task / "tests/canonical_test.py").write_text(row["canonical_tests"]["source"])
 
     # Native runner/worker.
     if language == "python":
@@ -330,7 +329,7 @@ def generate(
 
         (adapter_dir / filename).write_text(
             render_worker(
-                problem,
+                row,
                 language,
             )
         )
@@ -353,14 +352,13 @@ def generate(
 
 
 def generate_all(
-    problems: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
     output: Path,
-    languages: tuple[str, ...] = LANGUAGES,
     images: dict[str, str] | None = None,
     with_oracle: bool = False,
     skip_unsupported: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
-    """Generate tasks for every (problem, language), staging atomically.
+    """Generate one task per flat (problem, language) row, staging atomically.
 
     Returns (exclusions, count). Aborts (raising) on unsupported transports
     unless skip_unsupported, in which case they are recorded as exclusions.
@@ -371,18 +369,18 @@ def generate_all(
     with tempfile.TemporaryDirectory(dir=output.parent) as directory:
         staged = Path(directory) / "tasks"
         staged.mkdir()
-        for row in problems:
-            for language in languages:
-                if row["question_id"] in OMITTED_QUESTIONS:
-                    exclusions.append({"question_id": row["question_id"], "language": language,
-                                       "reason": OMITTED_QUESTIONS[row["question_id"]]})
-                    continue
-                try:
-                    generate(row, language, staged, images.get(language), with_oracle)
-                except NotImplementedError as exc:
-                    if not skip_unsupported:
-                        raise
-                    exclusions.append({"question_id": row["question_id"], "language": language, "reason": str(exc)})
+        for row in rows:
+            lang = row["language"]
+            if row["question_id"] in OMITTED_QUESTIONS:
+                exclusions.append({"question_id": row["question_id"], "language": lang,
+                                   "reason": OMITTED_QUESTIONS[row["question_id"]]})
+                continue
+            try:
+                generate(row, staged, images.get(lang), with_oracle)
+            except NotImplementedError as exc:
+                if not skip_unsupported:
+                    raise
+                exclusions.append({"question_id": row["question_id"], "language": lang, "reason": str(exc)})
         if exclusions:
             (staged / "exclusions.json").write_text(json.dumps(exclusions, indent=2) + "\n")
         staged.rename(output)

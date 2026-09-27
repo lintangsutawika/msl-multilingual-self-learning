@@ -572,7 +572,9 @@ def parse_php_interface(
         return None
 
     names = [
-        item.split("=", 1)[0].strip().lstrip("$")
+        # Strip a leading $ and an optional & (by-reference) so `&$nums` -> `nums`
+        # matches the @param comment key. Applies to both `$nums` and `&$nums`.
+        item.split("=", 1)[0].strip().lstrip("$").lstrip("&").lstrip("$")
         for item in function_match.group("params").split(",")
         if item.strip()
     ]

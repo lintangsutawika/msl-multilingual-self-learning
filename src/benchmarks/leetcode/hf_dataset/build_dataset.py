@@ -38,9 +38,15 @@ def flatten(records: list[dict]) -> list[dict]:
     """
     flat: list[dict] = []
     for rec in records:
-        interfaces = rec.pop("interfaces", {})
+        interfaces = rec.get("interfaces")
+        if not interfaces:
+            # Already a flat per-(problem, language) row.
+            flat.append(rec)
+            continue
+        if "interfaces" in rec:
+            rec = {k: v for k, v in rec.items() if k != "interfaces"}
         for language, interface in interfaces.items():
-            row = dict(rec)          # question_id, task_id, difficulty, problem_description, canonical_tests, metadata
+            row = dict(rec)
             row["language"] = language
             row["interface"] = interface
             flat.append(row)
