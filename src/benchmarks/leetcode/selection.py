@@ -71,11 +71,6 @@ def build_splits() -> dict[str, set[int]]:
         ALL_9_LANGUAGES,
     )
 
-    a2 = select_questions(
-        records,
-        MAIN_4_LANGUAGES,
-    )
-
     hf_test_ids = load_hf_test_ids()
 
     # Test = the a1 problems that newfacade's dataset marks as test (held out).
@@ -114,15 +109,6 @@ ALL_9_LANGUAGES = frozenset(
     }
 )
 
-
-MAIN_4_LANGUAGES = frozenset(
-    {
-        "python3",
-        "cpp",
-        "golang",
-        "java",
-    }
-)
 
 OUTPUT_DIR = Path(
     "benchmarks/leetcode/data/splits"

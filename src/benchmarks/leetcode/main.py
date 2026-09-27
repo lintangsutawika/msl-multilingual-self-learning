@@ -155,15 +155,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "--with-oracle",
-        action="store_true",
-        help=(
-            "Also emit a reference solution/solution.json "
-            "(needs Doocs checkout)."
-        ),
-    )
-
-    parser.add_argument(
         "--skip-unsupported",
         action="store_true",
         help=(
@@ -366,7 +357,6 @@ def main() -> None:
         problems,
         output=output_dir,
         images=images,
-        with_oracle=args.with_oracle,
         skip_unsupported=args.skip_unsupported,
     )
 

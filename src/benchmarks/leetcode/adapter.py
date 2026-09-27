@@ -244,7 +244,6 @@ def generate(
     row: dict[str, Any],
     output: Path,
     docker_image: str | None = None,
-    with_oracle: bool = False,
 ) -> Path:
     """Render one task from a flat (problem, language) row into a fresh subdir."""
     language = row["language"]
@@ -333,21 +332,6 @@ def generate(
                 language,
             )
         )
-    if with_oracle:
-        from .interfaces.doocs import find_solution_file
-        import re
-        path = find_solution_file(int(problem["question_id"]), language)
-        if path is None:
-            raise ValueError(f"Missing Doocs oracle for {problem['question_id']}/{language}")
-        code = path.read_text()
-        if language == "go" and not re.search(r"^package\s", code, re.M):
-            packages = ("sort", "slices", "strings", "strconv", "math", "fmt", "container/heap", "container/list", "unicode")
-            imports = [p for p in packages if re.search(r"\b" + p.split('/')[-1] + r"\.", code)]
-            code = "package main\n" + "".join(f'import "{p}"\n' for p in imports) + code
-        if language == "java":
-            code = "import java.util.*;\nimport java.math.*;\n" + code
-        (task / "solution/solution.json").write_text(json.dumps({"language": language, "code": code}))
-
     return task
 
 
@@ -355,7 +339,6 @@ def generate_all(
     rows: list[dict[str, Any]],
     output: Path,
     images: dict[str, str] | None = None,
-    with_oracle: bool = False,
     skip_unsupported: bool = False,
 ) -> tuple[list[dict[str, Any]], int]:
     """Generate one task per flat (problem, language) row, staging atomically.
@@ -376,7 +359,7 @@ def generate_all(
                                    "reason": OMITTED_QUESTIONS[row["question_id"]]})
                 continue
             try:
-                generate(row, staged, images.get(lang), with_oracle)
+                generate(row, staged, images.get(lang))
             except NotImplementedError as exc:
                 if not skip_unsupported:
                     raise
