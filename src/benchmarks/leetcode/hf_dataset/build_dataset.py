@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Build the neulab/leetcode Hugging Face dataset from LeetCode + GraphQL.
 
-Produces the post-interface rows, **flattened to one row per (problem, language)**
-(so the test split is 201 problems x 9 languages = 1809 rows). Each row carries a
-single `interface` for its `language`, plus the shared `canonical_tests` /
-`problem_description` / `metadata`. Writes JSONL into the target HF repo directory
-for a git push; `datasets.load_dataset("neulab/leetcode", split=...)` auto-discovers
-the `data/{train,test}.jsonl` files, which the task generator (adapter.py) consumes.
+Produces the post-interface rows, **flattened to one row per (problem, language)**,
+written as JSONL into the target HF repo. To stay under HF's 10 MiB/file limit without
+LFS, each split is emitted as one JSONL per language under `data/<split>/<lang>.jsonl`.
+HF auto-globs `data/<split>/*.jsonl` into a SINGLE split, so
+`load_dataset("neulab/leetcode", split="test")` returns all 1809 rows concatenated,
+with the `language` column distinguishing the rows.
 
 Usage:
     python src/benchmarks/leetcode/hf_dataset/build_dataset.py \
         [--out /home/aci18914wh/leetcode] [--only test]
 
-After writing data/{train,test}.jsonl + README.md, `git add . && git push` publishes.
+After writing data/{train,test}/<lang>.jsonl + README.md, `git add . && git push`
+publishes.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[4]))  # repo root
 
+from src.benchmarks.leetcode.adapter import LANGUAGES  # noqa: E402
 from src.benchmarks.leetcode.dataset import load_problems_hf  # noqa: E402
 
 DEFAULT_OUT = Path("/home/aci18914wh/leetcode")
@@ -30,23 +32,16 @@ SPLITS = ("train", "test")
 
 
 def flatten(records: list[dict]) -> list[dict]:
-    """Expand each nested problem-record into one row per (problem, language).
-
-    A nested record has `interfaces = {lang: interface}`; we emit one row per
-    language with `language` + a single `interface`, and carry the shared
-    `canonical_tests` / `problem_description` / `metadata` unchanged.
-    """
+    """Expand nested problem-records into one row per (problem, language)."""
     flat: list[dict] = []
     for rec in records:
         interfaces = rec.get("interfaces")
         if not interfaces:
-            # Already a flat per-(problem, language) row.
-            flat.append(rec)
+            flat.append(rec)              # already a flat row; keep as-is
             continue
-        if "interfaces" in rec:
-            rec = {k: v for k, v in rec.items() if k != "interfaces"}
+        base = {k: v for k, v in rec.items() if k != "interfaces"}
         for language, interface in interfaces.items():
-            row = dict(rec)
+            row = dict(base)
             row["language"] = language
             row["interface"] = interface
             flat.append(row)
@@ -56,21 +51,27 @@ def flatten(records: list[dict]) -> list[dict]:
 def build(split: str, out: Path) -> None:
     records = load_problems_hf(split)
     if not records:
-        print(f"[build] no records for {split}; snippets cache may be unpopulated", file=sys.stderr)
+        print(f"[build] no records for {split}", file=sys.stderr)
         return
     flat = flatten(records)
-    out_dir = out / "data"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"{split}.jsonl"
-    with path.open("w", encoding="utf-8") as fh:
-        for row in flat:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    print(f"[build] {split}: {len(records)} problems -> {len(flat)} rows -> {path}")
+    split_dir = out / "data" / split
+    split_dir.mkdir(parents=True, exist_ok=True)
+    # Group by language -> one small JSONL per language (each well under 10 MiB).
+    by_lang: dict[str, list[dict]] = {}
+    for row in flat:
+        by_lang.setdefault(row.get("language"), []).append(row)
+    total = 0
+    for lang, rows in sorted(by_lang.items()):
+        path = split_dir / f"{lang}.jsonl"
+        with path.open("w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        total += len(rows)
+        print(f"[build] {split}/{lang}: {len(rows)} rows -> {path}")
+    print(f"[build] {split}: {len(flat)} problems -> {total} rows total")
 
 
 def write_readme(out: Path) -> None:
-    # `language: code` is HF's required special value for programming-language /
-    # code datasets (per-language names like python/java/rust are NOT valid ISO codes).
     readme = """---
 license: apache-2.0
 language:
@@ -85,20 +86,21 @@ Post-interface rows for the msl-multilingual-self-learning benchmark, flattened 
 one row per (problem, language). Each row has the single `interface` for its
 `language` (python, cpp, go, java, rust, javascript, typescript, php, ruby), plus
 the shared `canonical_tests` (a Python check(candidate) oracle), `problem_description`,
-and `metadata`.
+and `metadata`. Stored as `data/<split>/<lang>.jsonl` (one JSONL per language, so
+each file stays well under HF's 10 MiB limit); HF globs them all into a single split.
 
 ## Splits
 
-- `train`: 2878 problems x 9 languages rows (all-9-language universe minus the
-  newfacade test split).
+- `train`: 2878 problems x 9 languages.
 - `test`: 201 problems x 9 languages = 1809 rows (held-out eval).
 
 ## Load
 
 ```python
 from datasets import load_dataset
-train = load_dataset("neulab/leetcode", split="train")
-test = load_dataset("neulab/leetcode", split="test")
+train = load_dataset("neulab/leetcode", split="train")  # one Dataset, all rows
+test  = load_dataset("neulab/leetcode", split="test")   # one Dataset, 1809 rows
+python_rows = test.filter(lambda r: r["language"] == "python")
 ```
 """
     (out / "README.md").write_text(readme, encoding="utf-8")
@@ -115,7 +117,7 @@ def main() -> None:
     for split in splits:
         build(split, args.out)
     write_readme(args.out)
-    print("[build] done. Push the repo to HF: cd <out> && git add . && git commit && git push")
+    print("[build] done. Push to HF: cd <out> && git add . && git commit && git push")
 
 
 if __name__ == "__main__":
