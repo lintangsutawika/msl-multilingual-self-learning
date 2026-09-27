@@ -16,18 +16,28 @@ def render_worker(problem, language):
         target = f"solution.{call}" if container else call
         instance = f"{container} solution;" if container else ""
         output = "string(1, result)" if interface["return_type"] == "char" else "result"
+        # A user-defined main() is renamed so it cannot clash with the runner's.
+        # Results go to a dup of the original stdout; fd 1 is then pointed at
+        # stderr so the solution's own prints (cout/printf) never corrupt them.
         return f'''#include <bits/stdc++.h>
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 using namespace std;
+#define main leetcode_user_main
 #include "solution.cpp"
+#undef main
 int main() {{
+    FILE* leetcode_out = fdopen(dup(1), "w");
+    dup2(2, 1);
     {instance}
     string line;
     while (getline(cin, line)) {{
         auto args = nlohmann::json::parse(line);
         {declarations}
         auto result = {target}({names});
-        cout << nlohmann::json({output}).dump() << endl;
+        cout.flush();
+        fprintf(leetcode_out, "%s\\n", nlohmann::json({output}).dump().c_str());
+        fflush(leetcode_out);
     }}
 }}
 '''
@@ -37,14 +47,16 @@ int main() {{
             f"var arg{i} {p['type']}; if err := json.Unmarshal(args[{i}], &arg{i}); err != nil {{ panic(err) }}"
             for i, p in enumerate(params)
         )
+        # The encoder keeps the real stdout; os.Stdout is then swapped to stderr
+        # so fmt.Print* calls in the solution do not corrupt the results.
         return f'''package main
 import ("encoding/json"; "os"; "io"; "reflect")
 // A nil Go slice represents an empty LeetCode array, not Python None.
-func jsonValue(value interface{{}}) interface{{}} {{
+func leetcodeJSONValue(value interface{{}}) interface{{}} {{
     v := reflect.ValueOf(value)
     if v.Kind() == reflect.Slice {{
         out := make([]interface{{}}, v.Len())
-        for i := range out {{ out[i] = jsonValue(v.Index(i).Interface()) }}
+        for i := range out {{ out[i] = leetcodeJSONValue(v.Index(i).Interface()) }}
         return out
     }}
     return value
@@ -52,12 +64,13 @@ func jsonValue(value interface{{}}) interface{{}} {{
 func main() {{
     decoder := json.NewDecoder(os.Stdin)
     encoder := json.NewEncoder(os.Stdout)
+    os.Stdout = os.Stderr
     for {{
         var args []json.RawMessage
         if err := decoder.Decode(&args); err == io.EOF {{ return }} else if err != nil {{ panic(err) }}
         {declarations}
         result := {call}({names})
-        if err := encoder.Encode(jsonValue({output})); err != nil {{ panic(err) }}
+        if err := encoder.Encode(leetcodeJSONValue({output})); err != nil {{ panic(err) }}
     }}
 }}
 '''
@@ -72,6 +85,9 @@ func main() {{
 import com.google.gson.*;
 class Runner {{
     public static void main(String[] unused) {{
+        // Keep the real stdout for results; the solution's prints go to stderr.
+        java.io.PrintStream leetcodeOut = System.out;
+        System.setOut(System.err);
         Gson gson = new Gson();
         {instance}
         Scanner input = new Scanner(System.in);
@@ -79,7 +95,7 @@ class Runner {{
             JsonArray args = JsonParser.parseString(input.nextLine()).getAsJsonArray();
             {declarations}
             var result = {target}({names});
-            System.out.println(gson.toJson(result));
+            leetcodeOut.println(gson.toJson(result));
         }}
     }}
 }}
@@ -100,14 +116,33 @@ class Runner {{
             else call
         )
 
-        return f'''use std::io::{{self, BufRead}};
+        # Runner imports live inside main() so they cannot collide with the
+        # solution's own `use` lines (include! shares the module scope). The
+        # judge drops `struct Solution;` / rewrites the call when the solution
+        # defines its own struct or free function. Results go to a dup of the
+        # original stdout; fd 1 is pointed at stderr for the solution's prints.
+        return f'''#[allow(unused_imports)]
+use std::collections::*;
+
+extern "C" {{
+    fn dup(fd: i32) -> i32;
+    fn dup2(src: i32, dst: i32) -> i32;
+}}
 
 struct Solution;
 
 include!("solution.rs");
 
 fn main() {{
-    let stdin = io::stdin();
+    use std::io::{{BufRead, Write}};
+    use std::os::unix::io::FromRawFd;
+
+    let mut leetcode_out = unsafe {{
+        let fd = dup(1);
+        dup2(2, 1);
+        std::fs::File::from_raw_fd(fd)
+    }};
+    let stdin = std::io::stdin();
 
     for line in stdin.lock().lines() {{
         let line = line.expect("failed to read stdin");
@@ -124,26 +159,82 @@ fn main() {{
 
         let result = {target}({names});
 
-        println!(
+        writeln!(
+            leetcode_out,
             "{{}}",
             serde_json::to_string(&result)
                 .expect("failed to serialize result")
-        );
+        )
+        .expect("failed to write result");
+        leetcode_out.flush().expect("failed to flush result");
     }}
 }}
 '''
     if language == "javascript":
+        # The solution may define the entry point as a declaration (function,
+        # var, let, const), export it via module.exports/exports, or wrap it in
+        # a Solution class. Its console writes to stderr, not the result stream,
+        # and LeetCode's JS libraries are available as globals.
         return f'''const fs = require("fs");
 const readline = require("readline");
 const vm = require("vm");
+const {{ Console }} = require("console");
 
 const solutionCode = fs.readFileSync("solution.js", "utf8");
 
-const context = {{}};
-vm.createContext(context);
-vm.runInContext(solutionCode, context);
+// Libraries LeetCode provides as globals (PriorityQueue, Queue, Deque, _).
+function leetcodeRequire(name) {{
+    try {{
+        return require(name);
+    }} catch (error) {{
+        return require("/usr/local/lib/node_modules/" + name);
+    }}
+}}
+function leetcodeLibrary(name) {{
+    try {{
+        return leetcodeRequire(name);
+    }} catch (error) {{
+        return {{}};
+    }}
+}}
 
-const target = context["{call}"];
+const solutionModule = {{ exports: {{}} }};
+const context = {{
+    ...leetcodeLibrary("@datastructures-js/priority-queue"),
+    ...leetcodeLibrary("@datastructures-js/queue"),
+    ...leetcodeLibrary("@datastructures-js/deque"),
+    _: leetcodeLibrary("lodash"),
+    module: solutionModule,
+    exports: solutionModule.exports,
+    require: Object.assign(leetcodeRequire, {{ main: undefined }}),
+    console: new Console({{ stdout: process.stderr, stderr: process.stderr }}),
+}};
+vm.createContext(context);
+vm.runInContext(solutionCode, context, {{ filename: "solution.js" }});
+
+function findTarget() {{
+    // Top-level let/const are not context properties, but they are visible
+    // to later scripts run in the same context.
+    const declared = vm.runInContext(
+        'typeof {call} === "function" ? {call} : undefined',
+        context,
+    );
+    if (declared) return declared;
+    const exported = solutionModule.exports;
+    if (typeof exported === "function") return exported;
+    if (exported && typeof exported["{call}"] === "function") return exported["{call}"];
+    const solutionClass = vm.runInContext(
+        'typeof Solution === "function" ? Solution : undefined',
+        context,
+    );
+    if (solutionClass && typeof solutionClass.prototype["{call}"] === "function") {{
+        const instance = new solutionClass();
+        return instance["{call}"].bind(instance);
+    }}
+    return undefined;
+}}
+
+const target = findTarget();
 
 if (typeof target !== "function") {{
     throw new Error("Expected function {call} was not defined");
@@ -194,17 +285,25 @@ rl.on("line", (line: string) => {{
 }});
 '''
     if language == "php":
+        # Accept the entry point as a Solution method or a free function. Any
+        # output the solution prints is captured and forwarded to stderr.
         if container:
             target = (
-                f"$solver = new {container}();\n"
-                f"$result = $solver->{call}(...$args);"
+                f"if (class_exists(\"{container}\") || !function_exists(\"{call}\")) {{\n"
+                f"        $solver = new {container}();\n"
+                f"        $result = $solver->{call}(...$args);\n"
+                f"    }} else {{\n"
+                f"        $result = {call}(...$args);\n"
+                f"    }}"
             )
         else:
             target = f"$result = {call}(...$args);"
 
         return f'''<?php
 
+ob_start();
 require_once "solution.php";
+fwrite(STDERR, ob_get_clean());
 
 while (($line = fgets(STDIN)) !== false) {{
     $line = trim($line);
@@ -215,24 +314,40 @@ while (($line = fgets(STDIN)) !== false) {{
 
     $args = json_decode($line, true);
 
+    ob_start();
     {target}
+    fwrite(STDERR, ob_get_clean());
 
     fwrite(STDOUT, json_encode($result) . PHP_EOL);
 }}
 '''
     if language == "ruby":
+        # Accept the entry point as a top-level method, a Solution instance
+        # method, or a Solution class method. $stdout is pointed at stderr so
+        # the solution's puts/print never corrupt the results on STDOUT.
         if container:
             target = (
                 f"solver = {container}.new\n"
-                f"result = solver.{call}(*args)"
+                f"  result = solver.{call}(*args)"
             )
         else:
-            target = f"result = {call}(*args)"
+            target = f"result = leetcode_target.call(*args)"
 
         return f'''require "json"
-require_relative "solution"
 
 STDOUT.sync = true
+$stdout = STDERR
+
+require_relative "solution"
+
+leetcode_target =
+  if respond_to?(:{call}, true)
+    method(:{call})
+  elsif defined?(Solution) && Solution.method_defined?(:{call})
+    Solution.new.method(:{call})
+  elsif defined?(Solution) && Solution.respond_to?(:{call})
+    Solution.method(:{call})
+  end
 
 while (line = STDIN.gets)
   line = line.strip

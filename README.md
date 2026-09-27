@@ -39,36 +39,121 @@ Results land under `jobs/<job-name>/`.
 
 ## Multilingual LeetCode
 
-This repository also contains a multilingual LeetCode benchmark for evaluating
-the same coding problems across nine programming languages:
-* Python
-* C++
-* Go
-* Java
-* Rust
-* JavaScript
-* TypeScript
-* PHP
-* Ruby
+A benchmark for comparing the same models across 9 languages on the same LeetCode problems: Python, C++, Go, Java, Rust, JavaScript, TypeScript, PHP and Ruby. Each (problem, language) pair is one Harbor task. 
+Every language is judged by the same test cases, and the verifier is built so that languages start on equal terms (see [How submissions are judged](#how-submissions-are-judged)).
 
-The benchmark uses official LeetCode `codeSnippets` metadata to define the
-language-specific function interfaces and a shared Harbor verifier to evaluate
-solutions across languages.
+Generated task directories are not committed; generate them from the committed dataset (`benchmarks/leetcode/data/`) as below. **Task directories embed the verifier, so regenerate them after pulling harness changes.**
 
-Generated Harbor task directories are not committed to Git. They should be
-regenerated locally from the committed execution dataset and split manifests.
+### Quick start (Set B)
+
+```bash
+uv sync
+
+# 1. Build the nine language images (once, or after a Dockerfile changes).
+LEETCODE_IMAGE_DIR=/path/to/images scripts/build/build_leetcode_images.sh
+
+# 2. Generate the Set B tasks; each task.toml points at its language image.
+LEETCODE_IMAGE_DIR=/path/to/images \
+uv run python -m src.benchmarks.leetcode --set b --skip-unsupported
+#    -> benchmarks/leetcode/tasks-b/ (1773 tasks), plus exclusions.json and
+#       dropped_tests.json describing what was left out
+
+# 3. Run an agent over them (mini-swe-agent is the default AGENT).
+TASK_PATH=benchmarks/leetcode/tasks-b \
+MODEL=openai/Qwen/Qwen3.5-9B MODEL_BASE_URL=http://127.0.0.1:8000/v1 \
+scripts/eval/run.sh
+```
+
+`scripts/eval/run.sbatch` serves the model with vLLM and runs the same eval on one node (`TASKS=benchmarks/leetcode/tasks-b`). Instead of step 1, generation
+can build the images itself with `--prebuild-sif`.
 
 ### Evaluation sets
-The benchmark defines three evaluation sets:
 
-* a1: all candidate problems supporting all 9 target languages (3079 problems; full execution dataset not prepared yet)
-* a2: all candidate problems supporting Python, C++, Go, and Java (3101 problems; full execution dataset not prepared yet)
-* b: a1 intersected with the newfacade/LeetCodeDataset test split (201 problems)
-Set B contains 201 selected problem IDs. Problem 3319 is currently excluded from runnable Harbor tasks because tree transport is not yet supported. This leaves 200 runnable problems across 9 languages, for a total of 1800 Harbor tasks.
+* b: problems supporting all 9 languages that intersected with the newfacade/LeetCodeDataset test split (201 problems)
 
-### Refresh LeetCode metadata and public examples
+Of Set B's 201 problems, 197 are runnable (1773 tasks): 3319 needs tree transport, which is not supported yet, and 3266, 3387 and 3405 have fewer than 10 valid test cases (see [Invalid test cases](#invalid-test-cases)).
 
-Refresh the official LeetCode metadata cache, then rebuild the execution
+### Images
+
+Each language's image is defined by its task template's Dockerfile, the single source for both `scripts/build/build_leetcode_images.sh` and `--prebuild-sif`:
+
+```text
+src/benchmarks/leetcode/task-template-<language>/environment/Dockerfile
+```
+
+The build script writes `leetcode-<language>.sif` for all nine languages (or only the languages named as arguments) to `$LEETCODE_IMAGE_DIR` (default `/data/user_data/$USER/msl-images/`), replacing existing images. The JavaScript and TypeScript images include the libraries LeetCode provides to
+those languages (`@datastructures-js/priority-queue` v6, `queue`, `deque`and `lodash`), available to solutions as globals.
+
+### Running an agent
+
+Tasks work with any Harbor agent. The agent's job is to leave its solution in `/workspace/solution.<ext>` (e.g. `solution.py`, `Solution.java`), which the verifier packages, or to write `/workspace/solution.json` directly:
+
+```json
+{"language": "cpp", "code": "..."}
+```
+
+The repository's `SimpleCodeAgent` asks the model once for the source file and writes `solution.json`:
+
+```bash
+AGENT="msl_multilingual_self_learning.agents.simple_code_agent:SimpleCodeAgent" \
+MODEL="openai/Qwen/Qwen3.5-9B" \
+MODEL_BASE_URL="http://127.0.0.1:8000/v1" \
+MODEL_API_KEY=dummy \
+TASK_PATH="benchmarks/leetcode/tasks-b" \
+scripts/eval/run.sh
+```
+
+`MAX_TOKENS` caps the model's completion and `AGENT_TIMEOUT_MULT` scales Harbor's agent timeout (task timeout 300 s).
+
+### Reading results
+
+Each trial's verdict is in `jobs/<job-name>/<task>__<id>/verifier/`:
+
+| File | Contents |
+| --- | --- |
+| `reward.txt` | `1` for pass, `0` otherwise |
+| `status.txt` | `PASS`, `WRONG_ANSWER`, `COMPILE_ERROR`, `RUNTIME_ERROR` or `TIMEOUT` |
+| `normalizations.json` | structural adaptations the verifier applied (see below) |
+| `compile.txt`, `worker-stderr.txt`, `test-stdout.txt` | compiler output, the solution's stderr/prints, and the failing assertion |
+
+A trial without `normalizations.json` never reached judging: the agent left no submission (e.g. it timed out), and `test-stdout.txt` reports the missing `solution.json`.
+
+### How submissions are judged
+
+Every language is judged by the same Python `check(candidate)` tests: the verifier (`tests/test.py`, from `src/benchmarks/leetcode/judge_runtime.py`) compiles the submission with a per-language runner and sends each call's arguments to it as a JSON line. Models are judged on their algorithm, not on
+guessing the runner's contract, so the verifier accepts any reasonable file structure, with LeetCode's usual implicit imports:
+
+* Go: any package name (rewritten to `main`), a user `main()`, and missing or unused standard imports (fixed from compiler errors)
+* Rust: the solution's own `struct Solution`, or a free function instead of an `impl Solution` method; `std::collections::*` is in scope
+* C++ (C++20): a free function instead of a `Solution` method; `bits/stdc++.h`
+* Java: no imports (`java.util.*`, `java.util.function.*`,
+  `java.util.stream.*` and `java.math.*` are added) and any `package` line
+* PHP: a missing `<?php` tag; JS: `module.exports` or `let`/`const` entry points; 
+* Ruby: a `Solution` class instead of a top-level method
+* TypeScript: compiled non-strict, targeting ES2022, with options pinned by the verifier
+
+Anything a solution prints goes to stderr and never affects the verdict.
+Builds happen in a fresh `/workspace/.leetcode-build/`, so files the agent leaves in `/workspace` (tsconfig.json, Cargo.toml, package.json) are ignored.
+
+The algorithm itself is never repaired: compile errors in the solution's own code, wrong answers and crashes count as failures.
+
+### Invalid test cases
+
+LeetCodeDataset generated its test inputs and recorded the Python reference solution's output without checking them against the problem's constraints, so some cases break the problem's own contract and have no well-defined answer. Generation removes them for every language:
+
+* inputs that violate LeetCode's Constraints section (e.g. `s.length == 30`
+  where the problem requires `s.length == t.length`, or queries `[5, 5]` where it requires `l < r`). `src/benchmarks/leetcode/constraints.py` turns each problem's Constraints into checks and records the violating cases in `benchmarks/leetcode/data/invalid_tests.json`;
+* values that do not fit a language's declared LeetCode types (board values of 7e9 cannot even be received in Rust/C++/Java's `int`), and expected outputs of `inf`/`-inf`, which no language can return.
+
+Problems left with fewer than 10 valid test cases are excluded. On Set B, 1857 of 20272 test cases are dropped across 146 problems. To rerun the audit (it fetches each problem's LeetCode page for its exact Constraints):
+
+```bash
+uv run python -m src.benchmarks.leetcode.constraints --set b --fetch
+```
+
+### Refreshing the dataset
+
+To refresh the official LeetCode metadata cache and rebuild the execution
 dataset:
 
 ```bash
@@ -78,10 +163,9 @@ uv run python -m src.benchmarks.leetcode.generate_dataset \
   --output benchmarks/leetcode/data/leetcode_multilingual_leetcode.jsonl
 ```
 
-The crawler gets public example inputs from LeetCode's
-`exampleTestcaseList` GraphQL field and their displayed answers from the
-corresponding `Output:` blocks in the official problem statement. Generated
-records keep these under `public_test_cases`:
+The crawler also records LeetCode's public examples (from the
+`exampleTestcaseList` GraphQL field and the statement's `Output:` blocks)
+under `public_test_cases`:
 
 ```json
 [
@@ -89,111 +173,8 @@ records keep these under `public_test_cases`:
 ]
 ```
 
-These official public examples are separate from `canonical_tests`, which
-continue to come from `newfacade/LeetCodeDataset` and drive the verifier.
-
-### Building the LeetCode container images
-Each language uses its own Apptainer/Singularity image. The image
-definitions are stored in:
-
-```text
-src/benchmarks/leetcode/images/
-```
-
-Build all nine language images with:
-
-```bash
-scripts/build/build_leetcode_images.sh
-```
-
-By default, the resulting SIF files are written to:
-
-```text
-/data/user_data/$USER/msl-images/
-```
-
-This produces:
-
-```text
-leetcode-python.sif
-leetcode-cpp.sif
-leetcode-go.sif
-leetcode-java.sif
-leetcode-rust.sif
-leetcode-javascript.sif
-leetcode-typescript.sif
-leetcode-php.sif
-leetcode-ruby.sif
-```
-
-To store the images somewhere else, set `LEETCODE_IMAGE_DIR`:
-
-```bash
-LEETCODE_IMAGE_DIR=/path/to/images \
-scripts/build/build_leetcode_images.sh
-```
-
-Use the same `LEETCODE_IMAGE_DIR` when running the benchmark:
-
-```bash
-LEETCODE_IMAGE_DIR=/path/to/images \
-scripts/eval/run_b.sh
-```
-
-
-### Prepare Harbor tasks
-Prepare Set B with:
-
-```bash
-uv run python -m src.benchmarks.leetcode \
-  --set b \
-  --skip-unsupported
-```
-
-This writes the generated Harbor tasks to:
-
-```text
-benchmarks/leetcode/tasks-b/
-```
-
-### SimpleCodeAgent
-The benchmark can be evaluated with the repository's `SimpleCodeAgent` through
-the standard evaluation script.
-
-For example:
-
-```bash
-AGENT="msl_multilingual_self_learning.agents.simple_code_agent:SimpleCodeAgent" \
-MODEL="openai/Qwen3.5-9B" \
-MODEL_BASE_URL="http://127.0.0.1:8000/v1" \
-MODEL_API_KEY=dummy \
-TASK_PATH="benchmarks/leetcode/tasks-b" \
-scripts/eval/run.sh
-```
-
-`MAX_TOKENS` controls the model completion limit:
-
-```bash
-MAX_TOKENS=8192
-```
-
-and `AGENT_TIMEOUT_MULT` controls Harbor's agent timeout multiplier:
-
-```bash
-AGENT_TIMEOUT_MULT=1.0
-```
-
-`SimpleCodeAgent` requests source code from the model and writes a common
-submission format:
-
-```json
-{
-  "language": "cpp",
-  "code": "..."
-}
-```
-
-The verifier compiles or executes the submitted source in the requested language and applies the benchmark correctness tests. Compilation errors, runtime errors, wrong answers, and passing solutions are recorded as evaluation outcomes rather than repaired automatically.
+These are separate from `canonical_tests`, which come from
+`newfacade/LeetCodeDataset` and drive the verifier. Rerun the constraint audit after rebuilding the dataset.
 
 ## Knobs (env vars)
 

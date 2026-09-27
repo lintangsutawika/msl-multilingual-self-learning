@@ -19,7 +19,7 @@ import os
 import shutil
 from pathlib import Path
 
-from .adapter import LANGUAGES, generate_all
+from .adapter import INVALID_TESTS, LANGUAGES, generate_all, load_invalid_tests
 
 
 DEFAULT_DATASET = Path(
@@ -168,6 +168,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Record unsupported transports in exclusions.json "
             "instead of aborting."
+        ),
+    )
+
+    parser.add_argument(
+        "--invalid-tests",
+        type=Path,
+        default=INVALID_TESTS,
+        help=(
+            "Constraint audit listing invalid test cases to drop "
+            f"(default: {INVALID_TESTS}; see constraints.py)."
         ),
     )
 
@@ -358,6 +368,7 @@ def main() -> None:
         images=images,
         with_oracle=args.with_oracle,
         skip_unsupported=args.skip_unsupported,
+        invalid_tests=load_invalid_tests(args.invalid_tests),
     )
 
     # Move prebuilt sifs into the task dir now that generation succeeded.

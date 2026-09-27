@@ -1,51 +1,42 @@
 #!/usr/bin/env bash
+# Build one LeetCode image per language from the task templates' Dockerfiles
+# (src/benchmarks/leetcode/task-template-<lang>/environment/Dockerfile), the same
+# definitions `--prebuild-sif` uses, into $LEETCODE_IMAGE_DIR/leetcode-<lang>.sif.
+#
+# Usage: scripts/build/build_leetcode_images.sh [language ...]   (default: all 9)
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
 IMAGE_DIR="${LEETCODE_IMAGE_DIR:-/data/user_data/$USER/msl-images}"
-DEF_DIR="src/benchmarks/leetcode/images"
+CONTAINER_BIN="${CONTAINER_BIN:-$(command -v apptainer || command -v singularity)}"
 
-LANGUAGES=(
-  python
-  cpp
-  go
-  java
-  rust
-  javascript
-  typescript
-  php
-  ruby
-)
+if [[ $# -gt 0 ]]; then
+  LANGUAGES=("$@")
+else
+  LANGUAGES=(python cpp go java rust javascript typescript php ruby)
+fi
 
 mkdir -p "$IMAGE_DIR"
 
-echo "Building LeetCode SIF images"
-echo "Definition directory: $DEF_DIR"
-echo "Output directory:     $IMAGE_DIR"
-echo
-
 for lang in "${LANGUAGES[@]}"; do
-  def_file="$DEF_DIR/$lang.def"
+  dockerfile="src/benchmarks/leetcode/task-template-$lang/environment/Dockerfile"
   sif_file="$IMAGE_DIR/leetcode-$lang.sif"
+  [[ -f "$dockerfile" ]] || { echo "ERROR: missing $dockerfile" >&2; exit 1; }
 
-  if [[ ! -f "$def_file" ]]; then
-    echo "ERROR: missing definition file: $def_file" >&2
-    exit 1
-  fi
-
-  echo "============================================================"
-  echo "Building $lang"
-  echo "  $def_file"
-  echo "  -> $sif_file"
-  echo "============================================================"
-
-  apptainer build "$sif_file" "$def_file"
-
-  echo
+  echo "=== Building $lang: $dockerfile -> $sif_file"
+  # Build next to the target, then replace it in one step, so rebuilding works
+  # and nothing reading the old image sees a partial file.
+  tmp_sif="$sif_file.building"
+  rm -f "$tmp_sif" "$tmp_sif.def"
+  uv run python -c "
+import sys
+from pathlib import Path
+from src.benchmarks.leetcode.adapter import prebuild_sif
+prebuild_sif(Path(sys.argv[1]), Path(sys.argv[2]), container_bin=sys.argv[3])
+" "$dockerfile" "$tmp_sif" "$CONTAINER_BIN"
+  mv -f "$tmp_sif" "$sif_file"
+  rm -f "$tmp_sif.def"
 done
 
-echo "All images built successfully:"
-for lang in "${LANGUAGES[@]}"; do
-  echo "  $IMAGE_DIR/leetcode-$lang.sif"
-done
+echo "Built: ${LANGUAGES[*]} in $IMAGE_DIR"
