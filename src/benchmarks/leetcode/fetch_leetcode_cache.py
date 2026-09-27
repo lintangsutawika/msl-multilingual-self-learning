@@ -7,6 +7,8 @@ from pathlib import Path
 
 import requests
 
+from .public_testcases import build_public_test_cases
+
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -39,6 +41,8 @@ query questionEditorData($titleSlug: String!) {
     questionFrontendId
     title
     titleSlug
+    content
+    exampleTestcaseList
     codeSnippets {
       lang
       langSlug
@@ -201,7 +205,12 @@ def main() -> None:
                     out.read_text()
                 )
 
-                if "code_snippets" in existing:
+                if (
+                    "code_snippets" in existing
+                    and "content_html" in existing
+                    and "example_testcase_list" in existing
+                    and "public_test_cases" in existing
+                ):
                     cached += 1
                     continue
 
@@ -213,10 +222,24 @@ def main() -> None:
         try:
             question = fetch_question(slug)
 
+            public_test_cases, public_test_case_stats = (
+                build_public_test_cases(
+                    question.get("exampleTestcaseList"),
+                    question.get("content"),
+                )
+            )
+
             record = {
                 "question_id": qid,
                 "title": question["title"],
                 "title_slug": question["titleSlug"],
+                "content_html": question.get("content"),
+                "example_testcase_list": (
+                    question.get("exampleTestcaseList")
+                    or []
+                ),
+                "public_test_cases": public_test_cases,
+                "public_test_case_stats": public_test_case_stats,
                 "code_snippets": (
                     question.get("codeSnippets")
                     or []

@@ -45,6 +45,7 @@ AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-1.0}"
 QUIET="${QUIET:-0}"
 AGENT="${AGENT:-mini-swe-agent}"
 MAX_TOKENS="${MAX_TOKENS:-8192}"
+REQUEST_TIMEOUT="${REQUEST_TIMEOUT:-10200}"
 
 [ -d "${TASK_PATH}" ] || { echo "ERROR: task path not found: ${TASK_PATH}" >&2; exit 2; }
 [ -f "${CONFIG_FILE}" ] || { echo "ERROR: config file not found: ${CONFIG_FILE}" >&2; exit 2; }
@@ -70,6 +71,7 @@ ARGS=(
     --ae "OPENAI_BASE_URL=${MODEL_BASE_URL}"
     --ae "OPENAI_API_KEY=${MODEL_API_KEY}"
     --ae "MAX_TOKENS=${MAX_TOKENS}"
+    --ae "REQUEST_TIMEOUT=${REQUEST_TIMEOUT}"
     -n "${N_CONCURRENT}"
     --job-name "${JOB_NAME}"
     -o "${JOBS_DIR}"

@@ -66,6 +66,32 @@ The benchmark defines three evaluation sets:
 * b: a1 intersected with the newfacade/LeetCodeDataset test split (201 problems)
 Set B contains 201 selected problem IDs. Problem 3319 is currently excluded from runnable Harbor tasks because tree transport is not yet supported. This leaves 200 runnable problems across 9 languages, for a total of 1800 Harbor tasks.
 
+### Refresh LeetCode metadata and public examples
+
+Refresh the official LeetCode metadata cache, then rebuild the execution
+dataset:
+
+```bash
+uv run python -m src.benchmarks.leetcode.fetch_leetcode_cache
+uv run python -m src.benchmarks.leetcode.generate_dataset \
+  --split test \
+  --output benchmarks/leetcode/data/leetcode_multilingual_leetcode.jsonl
+```
+
+The crawler gets public example inputs from LeetCode's
+`exampleTestcaseList` GraphQL field and their displayed answers from the
+corresponding `Output:` blocks in the official problem statement. Generated
+records keep these under `public_test_cases`:
+
+```json
+[
+  {"input": "[2,7,11,15]\n9", "output": "[0,1]"}
+]
+```
+
+These official public examples are separate from `canonical_tests`, which
+continue to come from `newfacade/LeetCodeDataset` and drive the verifier.
+
 ### Building the LeetCode container images
 Each language uses its own Apptainer/Singularity image. The image
 definitions are stored in:

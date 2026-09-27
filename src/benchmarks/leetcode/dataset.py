@@ -28,10 +28,10 @@ class LeetCodeProblem:
     input_output: list[dict[str, str]]
 
 
-def load_test_split() -> list[LeetCodeProblem]:
+def load_split(split: str) -> list[LeetCodeProblem]:
     dataset = load_dataset(
         DATASET_NAME,
-        split="test",
+        split=split,
     )
 
     problems: list[LeetCodeProblem] = []
@@ -53,6 +53,14 @@ def load_test_split() -> list[LeetCodeProblem]:
         problems.append(problem)
 
     return problems
+
+
+def load_test_split() -> list[LeetCodeProblem]:
+    return load_split("test")
+
+
+def load_train_split() -> list[LeetCodeProblem]:
+    return load_split("train")
 
 
 def load_problem(

@@ -74,16 +74,17 @@ def select_questions(
     }
 
 
-def load_hf_test_ids() -> set[int]:
+def load_hf_split_ids(split: str) -> set[int]:
     dataset = load_dataset(
         HF_DATASET_NAME,
-        split="test",
+        split=split,
     )
 
     return {
         int(row["question_id"])
         for row in dataset
     }
+
 
 
 def build_splits() -> dict[str, set[int]]:
@@ -99,12 +100,15 @@ def build_splits() -> dict[str, set[int]]:
         MAIN_4_LANGUAGES,
     )
 
-    hf_test_ids = load_hf_test_ids()
+    hf_train_ids = load_hf_split_ids("train")
+    hf_test_ids = load_hf_split_ids("test")
 
+    a3 = a1 & hf_train_ids
     b = a1 & hf_test_ids
 
     return {
         "a1": a1,
         "a2": a2,
+        "a3": a3,
         "b": b,
     }

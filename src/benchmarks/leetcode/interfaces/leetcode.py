@@ -80,11 +80,13 @@ def _parse_type_before_name(
         vector<vector<int>>& queries
         List<Integer> nums
         TreeNode* root
+        TreeNode *root
+        ListNode*& head
     """
     text = text.strip()
 
     match = re.match(
-        r"^(?P<type>.+?)\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)$",
+        r"^(?P<type>.+?)\s+(?P<prefix>[*&]*)(?P<name>[A-Za-z_][A-Za-z0-9_]*)$",
         text,
     )
 
@@ -93,11 +95,16 @@ def _parse_type_before_name(
             f"Could not parse parameter: {text!r}"
         )
 
+    type_name = match.group("type").strip()
+    prefix = match.group("prefix")
+
+    if prefix:
+        type_name = f"{type_name}{prefix}"
+
     return Parameter(
         name=match.group("name"),
-        type=match.group("type").strip(),
+        type=type_name,
     )
-
 
 def parse_python_interface(
     question_id: int,
@@ -177,24 +184,29 @@ def parse_cpp_interface(
 ) -> SolutionInterface | None:
     pattern = re.compile(
         r"""
+        ^[ 	]*
         (?:
             public:
-            \s*
+            [ 	]*
         )?
         (?P<return>
             [A-Za-z_]
-            [A-Za-z0-9_:<>,\s*&]*
+            [A-Za-z0-9_:<>, 	*&]*
         )
-        \s+
+        [ 	]+
         (?P<name>[A-Za-z_][A-Za-z0-9_]*)
-        \s*
+        [ 	]*
         \(
-            (?P<params>.*?)
+            (?P<params>[^(){};]*)
         \)
-        \s*
+        [ 	]*
+        (?:
+            const
+            [ 	]*
+        )?
         \{
         """,
-        re.VERBOSE | re.DOTALL,
+        re.VERBOSE | re.MULTILINE,
     )
 
     matches = list(
@@ -253,9 +265,11 @@ def parse_rust_interface(
             (?P<params>.*?)
         \)
         \s*
-        ->
-        \s*
-        (?P<return>[^{\n]+)
+        (?:
+            ->
+            \s*
+            (?P<return>[^{\n]+)
+        )?
         \s*
         \{
         """,
@@ -272,6 +286,17 @@ def parse_rust_interface(
     for item in _split_top_level_commas(
         match.group("params")
     ):
+        item = item.strip()
+
+        # Rust method receiver; not an actual task parameter.
+        if item in {
+            "self",
+            "mut self",
+            "&self",
+            "&mut self",
+        }:
+            continue
+
         if ":" not in item:
             raise ValueError(
                 f"Could not parse Rust parameter: {item!r}"
@@ -292,7 +317,11 @@ def parse_rust_interface(
         container="Solution",
         callable_name=match.group("name").strip(),
         parameters=tuple(parameters),
-        return_type=match.group("return").strip(),
+        return_type=(
+            match.group("return").strip()
+            if match.group("return")
+            else "()"
+        ),
         source="leetcode",
         raw_signature=match.group(0).strip(),
     )
@@ -384,11 +413,26 @@ def parse_go_interface(
         return None
 
     parameters: list[Parameter] = []
+    pending_names: list[str] = []
 
     for item in _split_top_level_commas(
         match.group("params")
     ):
         item = item.strip()
+
+        # Go permits grouped parameter declarations:
+        #
+        #     root, p, q *TreeNode
+        #
+        # All three names have type *TreeNode.
+        bare_name_match = re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*",
+            item,
+        )
+
+        if bare_name_match is not None:
+            pending_names.append(item)
+            continue
 
         parameter_match = re.match(
             r"^(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s+(?P<type>.+)$",
@@ -400,11 +444,30 @@ def parse_go_interface(
                 f"Could not parse Go parameter: {item!r}"
             )
 
+        name = parameter_match.group("name")
+        type_name = parameter_match.group("type").strip()
+
+        for pending_name in pending_names:
+            parameters.append(
+                Parameter(
+                    name=pending_name,
+                    type=type_name,
+                )
+            )
+
+        pending_names.clear()
+
         parameters.append(
             Parameter(
-                name=parameter_match.group("name"),
-                type=parameter_match.group("type").strip(),
+                name=name,
+                type=type_name,
             )
+        )
+
+    if pending_names:
+        raise ValueError(
+            "Go parameter name(s) without a following type: "
+            f"{pending_names}"
         )
 
     return SolutionInterface(
@@ -571,11 +634,23 @@ def parse_php_interface(
     if return_match is None:
         return None
 
-    names = [
-        item.split("=", 1)[0].strip().lstrip("$")
-        for item in function_match.group("params").split(",")
-        if item.strip()
-    ]
+    names = []
+
+    for item in function_match.group("params").split(","):
+        item = item.strip()
+
+        if not item:
+            continue
+
+        match = re.search(
+            r"\$([A-Za-z_][A-Za-z0-9_]*)",
+            item,
+        )
+
+        if match is None:
+            return None
+
+        names.append(match.group(1))
 
     parameters = tuple(
         Parameter(

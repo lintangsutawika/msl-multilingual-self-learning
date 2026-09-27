@@ -6,7 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .dataset import load_test_split
+from .dataset import load_split
 from .interfaces.derive import parse_hf_python_signature
 from .interfaces.leetcode import (
     LANGUAGE_SLUGS,
@@ -299,11 +299,21 @@ def _build_record(
     problem: Any,
     interfaces: dict[str, Any],
 ) -> dict[str, Any]:
-    return {
-        "question_id": _problem_value(
+    question_id = int(
+        _problem_value(
             problem,
             "question_id",
-        ),
+        )
+    )
+    cache_record = json.loads(
+        (
+            LEETCODE_SNIPPET_CACHE
+            / f"{question_id}.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    return {
+        "question_id": question_id,
         "task_id": _problem_value(
             problem,
             "task_id",
@@ -324,6 +334,10 @@ def _build_record(
                 "test",
             ),
         },
+        "public_test_cases": cache_record.get(
+            "public_test_cases",
+            [],
+        ),
         "metadata": {
             "canonical_parameter_names": [
                 parameter.name
@@ -343,14 +357,26 @@ def _build_record(
             "interface_source": (
                 "leetcode/codeSnippets"
             ),
+            "public_test_case_source": (
+                "leetcode/exampleTestcaseList+content"
+            ),
+            "public_test_case_stats": cache_record.get(
+                "public_test_case_stats",
+                {
+                    "input_count": 0,
+                    "output_count": 0,
+                    "paired_count": 0,
+                },
+            ),
         },
     }
 
 
 def generate_dataset(
     output_path: Path,
+    split: str,
 ) -> None:
-    problems = load_test_split()
+    problems = load_split(split)
 
     output_path.parent.mkdir(
         parents=True,
@@ -413,7 +439,7 @@ def generate_dataset(
             )
 
     print(
-        f"HF test problems: {len(problems)}"
+        f"HF {split} problems: {len(problems)}"
     )
 
     print(
@@ -465,6 +491,12 @@ def parse_args() -> argparse.Namespace:
             f"Default: {DEFAULT_OUTPUT}"
         ),
     )
+    parser.add_argument(
+        "--split",
+        choices=("train", "test"),
+        default="test",
+        help="Hugging Face split to convert. Default: test.",
+    )
 
     return parser.parse_args()
 
@@ -473,7 +505,8 @@ def main() -> None:
     args = parse_args()
 
     generate_dataset(
-        args.output
+        args.output,
+        args.split,
     )
 
 

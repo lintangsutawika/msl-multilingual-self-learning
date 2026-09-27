@@ -108,9 +108,16 @@ class SimpleCodeAgent(BaseAgent):
                 len("openai/"):
             ]
 
+        request_timeout = float(
+            self._get_env("REQUEST_TIMEOUT")
+            or "10800"
+        )
+
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            timeout=request_timeout,
+            max_retries=0,
         )
 
         max_tokens = int(

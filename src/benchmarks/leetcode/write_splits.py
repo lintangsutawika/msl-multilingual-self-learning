@@ -37,6 +37,12 @@ def main() -> None:
             ),
             "languages": sorted(MAIN_4_LANGUAGES),
         },
+        "a3": {
+            "description": (
+                "A1 intersected with newfacade/LeetCodeDataset train split"
+            ),
+            "languages": sorted(ALL_9_LANGUAGES),
+        },
         "b": {
             "description": (
                 "A1 intersected with newfacade/LeetCodeDataset test split"
@@ -45,7 +51,7 @@ def main() -> None:
         },
     }
 
-    for name in ("a1", "a2", "b"):
+    for name in ("a1", "a2", "a3", "b"):
         ids = sorted(splits[name])
 
         questions = []
