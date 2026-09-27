@@ -1,61 +1,80 @@
 #!/usr/bin/env bash
-# Serve a model with vLLM, running the binary inside the base sif built by
-# scripts/build/vllm.sh (apptainer exec --nv). The sif carries its own vllm + CUDA
-# runtime, so this does not need a vllm install on the host.
+# Serve vLLM on this node's GPUs, running the binary inside the CUDA vLLM sif.
+# Reused by scripts/eval/run.sbatch (which backgrounds this and waits on /health).
+# Foreground-exec model: this script runs vllm in the FOREGROUND; the caller is
+# responsible for backgrounding it (run.sbatch does `bash serve_vllm.sh &`) and for
+# stopping it.
 #
-# Usage:
-#   scripts/serve_vllm.sh                      # defaults below
-#   MODEL=Qwen/Qwen3.5-9B PORT=8000 scripts/serve_vllm.sh
+# Usage (from the repo root):
+#   VLLM_CUDA_SIF=/path/vllm.sif MODEL=Qwen/Qwen3.5-9B PORT=8000 \
+#       bash scripts/serve/serve_vllm.sh
 #
-# Knobs:
-#   SIF_PATH   base vllm sif to exec into (default scripts/build/vllm.sif)
-#   MODEL      HF model id / local path to serve
-#   PORT       serve port (default 8000)
-#   HF_CACHE   host dir exposed as the container HF cache (default ~/.cache/huggingface)
-#   VLLM_ARGS_EXTRA  extra args appended to the default tensor-parallel/reasoning set
+# Knobs (env vars) -- node/accelerator knobs only:
+#   VLLM_CUDA_SIF    CUDA vLLM Singularity image (default $PWD/vllm-openai-cuda-*.sif
+#                    is NOT assumed; set it, or SIF_PATH for a named base).
+#   SIF_PATH         alias for VLLM_CUDA_SIF (legacy).
+#   MODEL            HF repo to serve (default Qwen/Qwen3.5-9B).
+#   PORT             serve port (default 8000).
+#   TENSOR_PARALLEL  TP (default 1); DATA_PARALLEL DP (default 8).
+#   MAX_MODEL_LEN    context length (default 262144).
+#   GPU_MEM_UTIL     gpu-memory-utilization (default 0.85).
+#   BASE_DIR         node-local base for scratch (default ${PBS_LOCALDIR:-${TMPDIR:-/tmp}}).
+#   CACHE_DIR        single host cache dir bound at /cache (default
+#                    ${XDG_CACHE_HOME:-${BASE_DIR}}/.cache -- honors the .env XDG_CACHE_HOME).
+#   VLLM_ARGS_EXTRA  model-intrinsic vLLM flags (parsers, dtype, context knobs). These
+#                    come from configs/serve/<MODEL>.json via run.sbatch; set explicitly
+#                    for manual/standalone runs.
+#   APPTAINER_BIN    override the container tool (auto: apptainer > singularity).
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 
-# Resolve the base sif: explicit SIF_PATH, else the build script's default output.
-SIF_PATH="${SIF_PATH:-scripts/build/vllm.sif}"
+VLLM_CUDA_SIF="${VLLM_CUDA_SIF:-${SIF_PATH:-}}"
 MODEL="${MODEL:-Qwen/Qwen3.5-9B}"
 PORT="${PORT:-8000}"
-HF_CACHE="${HF_CACHE:-${HOME}/.cache/huggingface}"
+TENSOR_PARALLEL="${TENSOR_PARALLEL:-1}"
+DATA_PARALLEL="${DATA_PARALLEL:-8}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
+GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
+BASE_DIR="${BASE_DIR:-${PBS_LOCALDIR:-${TMPDIR:-/tmp}}}"
+# Honor the .env XDG_CACHE_HOME (node-local scratch) as the cache root; fall back to
+# BASE_DIR (or /tmp) when unset (e.g. a login shell). Keeps caches off quota-limited HOME.
+CACHE_DIR="${CACHE_DIR:-${XDG_CACHE_HOME:-${BASE_DIR}}/.cache}"
+APPTAINER_BIN="${APPTAINER_BIN:-$(command -v apptainer || command -v singularity || echo singularity)}"
 
-if [ ! -f "${SIF_PATH}" ]; then
-    echo "ERROR: base sif not found at ${SIF_PATH}. Build it first with scripts/build/vllm.sh." >&2
+if [ -z "${VLLM_CUDA_SIF}" ]; then
+    echo "ERROR: VLLM_CUDA_SIF (or SIF_PATH) not set." >&2
+    echo "       Build one first: scripts/build/build_vllm.sh cuda" >&2
     exit 2
 fi
+[ -f "${VLLM_CUDA_SIF}" ] || { echo "ERROR: sif not found: ${VLLM_CUDA_SIF}" >&2; exit 2; }
+command -v "${APPTAINER_BIN}" >/dev/null 2>&1 || { echo "ERROR: container tool not found: ${APPTAINER_BIN}" >&2; exit 127; }
 
-# Resolve the container runtime (must match what built the sif).
-if command -v apptainer >/dev/null 2>&1;     then RUNTIME=( apptainer )
-elif command -v singularity >/dev/null 2>&1; then RUNTIME=( singularity )
-else echo "ERROR: neither apptainer nor singularity found on PATH." >&2; exit 127; fi
+# ABCI/PBS can hand GPUs as UUIDs; vLLM needs integer indices.
+case "${CUDA_VISIBLE_DEVICES:-}" in
+    *[!0-9,]*)
+        _NGPU=$(printf '%s' "${CUDA_VISIBLE_DEVICES}" | tr ',' '\n' | grep -c .)
+        export CUDA_VISIBLE_DEVICES="$(seq -s, 0 $((_NGPU - 1)))"
+        echo "[serve] normalized CUDA_VISIBLE_DEVICES -> ${CUDA_VISIBLE_DEVICES}" >&2 ;;
+esac
 
-# Default serve args mirror the original scaffold (data-parallel 8 on this node; the
-# 8x RTX A6000 tensor-parallel layout). Override the size with TENSOR_PARALLEL if needed.
-DATA_PARALLEL_SIZE="${DATA_PARALLEL_SIZE:-8}"
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"
-
-VLLM_ARGS=(
-    serve "${MODEL}"
-    --port "${PORT}"
-    --data-parallel-size "${DATA_PARALLEL_SIZE}"
-    --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}"
-    --max-model-len "${MAX_MODEL_LEN}"
-    --reasoning-parser qwen3
-    --enable-auto-tool-choice
-    --tool-call-parser qwen3_coder
-)
-# shellcheck disable=SC2206
-VLLM_ARGS+=( ${VLLM_ARGS_EXTRA:-} )
-
-echo "sif:   ${SIF_PATH}"
-echo "model: ${MODEL}  port: ${PORT}  hf_cache: ${HF_CACHE}"
-echo "+ ${RUNTIME[*]} exec --nv --no-home --env PYTHONNOUSERSITE=1 --bind ${HF_CACHE}:/hf-cache --env HF_HOME=/hf-cache ${SIF_PATH} vllm ${VLLM_ARGS[*]}"
-exec "${RUNTIME[@]}" exec --nv --no-home \
-    --env PYTHONNOUSERSITE=1 \
-    --bind "${HF_CACHE}:/hf-cache" \
-    --env HF_HOME=/hf-cache \
-    "${SIF_PATH}" vllm "${VLLM_ARGS[@]}"
+echo "[serve] launching vLLM ${MODEL} :${PORT} (TP=${TENSOR_PARALLEL} DP=${DATA_PARALLEL}) in ${VLLM_CUDA_SIF}" >&2
+mkdir -p "${CACHE_DIR}"
+export APPTAINER_TMPDIR="${BASE_DIR}" SINGULARITY_TMPDIR="${BASE_DIR}"
+# One host cache dir (node-local scratch, not quota-limited HOME) bound at /cache; all
+# of HF models, vLLM's torch_compile_cache, and tmp live under it so nothing touches HOME.
+exec "${APPTAINER_BIN}" exec --nv --writable-tmpfs \
+    --workdir "${BASE_DIR}" \
+    --bind "${CACHE_DIR}:/cache" \
+    --env TMPDIR=/cache/tmp \
+    --env HF_HOME=/cache/huggingface \
+    --env VLLM_CACHE_ROOT=/cache/vllm \
+    --env "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}" \
+    "${VLLM_CUDA_SIF}" \
+    vllm serve "${MODEL}" \
+        --host 0.0.0.0 \
+        --port "${PORT}" \
+        --tensor-parallel-size "${TENSOR_PARALLEL}" \
+        --data-parallel-size "${DATA_PARALLEL}" \
+        --max-model-len "${MAX_MODEL_LEN}" \
+        --gpu-memory-utilization "${GPU_MEM_UTIL}" \
+        ${VLLM_ARGS_EXTRA:-}

@@ -12,7 +12,7 @@ WORKSPACE = Path(
     )
 )
 
-LANGUAGE = "javascript"
+LANGUAGE = "php"
 SOURCE_FILE = "solution.php"
 TARGET = WORKSPACE / "solution.json"
 
