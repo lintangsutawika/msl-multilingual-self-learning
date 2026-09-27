@@ -9,8 +9,8 @@
 #   * reasoning_effort = "high" ALWAYS (medium/low trade accuracy; not for eval).
 #   * temperature 1.0, top_p 0.95.
 #   * allow >= 32768 max_tokens so reasoning is never cut off (truncated reasoning
-#     is a failed response). BUT mini-swe sets its own max_tokens; these settings
-#     are the generation defaults mini-swe should use.
+#     is a failed response). mini-swe sets no max_tokens itself, so it is set
+#     below (see model_kwargs).
 #   * tool calls in xml/json/xml_typed (default xml), parsed by k2_horizon parser.
 # reasoning_effort + tool_call_format ride in extra_body.chat_template_kwargs
 # (drop_params keeps litellm from erroring on them for the openai provider).
@@ -21,6 +21,13 @@
 # Wrong tool parser silently zeroes the eval (memory: vllm-tool-parser-gotcha).
 model:
   model_kwargs:
+    # Cap each response: with no max_tokens vLLM generates up to max_model_len
+    # (262144), and a thinking loop then hangs one request for the whole agent
+    # budget (seen as step-0 AgentTimeoutErrors in tasks-b).
+    max_tokens: 32768
+    # Per-request litellm timeout (overrides harbor's 3600s default); fits a
+    # full 32768-token response under load, fails a wedged request early.
+    timeout: 1200
     temperature: 1.0
     top_p: 0.95
     drop_params: true
