@@ -26,7 +26,6 @@ DEFAULT_DATASET = Path(
     "benchmarks/leetcode/data/leetcode_multilingual_leetcode.jsonl"
 )
 DEFAULT_OUTPUT = Path("benchmarks/leetcode/tasks")
-SPLIT_DIR = Path("benchmarks/leetcode/data/splits")
 
 SET_LANGUAGES = {
     "train": LANGUAGES,
@@ -49,23 +48,6 @@ def load_problems_hf_or_file(dataset: Path | None, split: str) -> list[dict]:
         return load_problems(dataset)
     from .dataset import load_problems_hf
     return load_problems_hf(split)
-
-
-def load_split_ids(name: str) -> set[int]:
-    path = SPLIT_DIR / f"{name}.json"
-
-    if not path.is_file():
-        raise SystemExit(
-            f"Split manifest not found: {path}. "
-            "Run: uv run python -m src.benchmarks.leetcode.selection"
-        )
-
-    payload = json.loads(path.read_text())
-
-    return {
-        int(question["question_id"])
-        for question in payload["questions"]
-    }
 
 
 def _resolve_langs(value: str | None) -> tuple[str, ...]:
@@ -222,35 +204,6 @@ def main() -> None:
     # Map --set to an HF split: train -> train, test -> test.
     _split = args.set if args.set in ("train", "test") else "test"
     problems = load_problems_hf_or_file(args.dataset, _split)
-
-    if args.set is not None:
-        wanted = load_split_ids(args.set)
-
-        available = {
-            int(problem["question_id"])
-            for problem in problems
-        }
-
-        missing = sorted(wanted - available)
-
-        if missing:
-            preview = ", ".join(
-                str(qid)
-                for qid in missing[:10]
-            )
-
-            raise SystemExit(
-                f"Dataset {args.dataset} does not contain "
-                f"{len(missing)} question(s) required by set {args.set}. "
-                f"First missing IDs: {preview}. "
-                "Generate/use the corresponding execution dataset first."
-            )
-
-        problems = [
-            problem
-            for problem in problems
-            if int(problem["question_id"]) in wanted
-        ]
 
     if args.question_id:
         wanted = set(args.question_id)
