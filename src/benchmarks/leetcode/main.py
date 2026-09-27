@@ -22,15 +22,7 @@ from pathlib import Path
 from .adapter import LANGUAGES, generate_all
 
 
-DEFAULT_DATASET = Path(
-    "benchmarks/leetcode/data/leetcode_multilingual_leetcode.jsonl"
-)
 DEFAULT_OUTPUT = Path("benchmarks/leetcode/tasks")
-
-SET_LANGUAGES = {
-    "train": LANGUAGES,
-    "test": LANGUAGES,
-}
 
 
 def load_problems(dataset: Path) -> list[dict]:
@@ -43,7 +35,7 @@ def load_problems(dataset: Path) -> list[dict]:
 
 def load_problems_hf_or_file(dataset: Path | None, split: str) -> list[dict]:
     """Return problem rows: an explicit --dataset JSONL if given, else the
-    hosted neulab/leetcode dataset (pulled), else a live HF+GraphQL build."""
+    hosted neulab/leetcode dataset (pulled)."""
     if dataset is not None:
         return load_problems(dataset)
     from .dataset import load_problems_hf
@@ -183,22 +175,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
+    languages = _resolve_langs(args.lang)   # default = LANGUAGES (all 9), like SET_LANGUAGES
     if args.set is not None:
-        default_languages = SET_LANGUAGES[args.set]
-
-        if args.lang is None:
-            languages = tuple(default_languages)
-        else:
-            languages = _resolve_langs(args.lang)
-
-        if args.output_dir is None:
-            output_dir = Path(
-                f"benchmarks/leetcode/tasks-{args.set}"
-            )
-        else:
-            output_dir = args.output_dir
+        output_dir = (
+            Path(f"benchmarks/leetcode/tasks-{args.set}")
+            if args.output_dir is None
+            else args.output_dir
+        )
     else:
-        languages = _resolve_langs(args.lang)
         output_dir = args.output_dir or DEFAULT_OUTPUT
 
     # Map --set to an HF split: train -> train, test -> test.

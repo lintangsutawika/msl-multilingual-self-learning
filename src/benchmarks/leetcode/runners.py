@@ -2,14 +2,22 @@
 from __future__ import annotations
 
 
+python_src = 'import contextlib\nimport json\nimport sys\nfrom typing import *\nfrom collections import *\nfrom functools import *\nfrom itertools import *\nfrom heapq import *\nfrom bisect import *\nfrom math import *\nimport collections, functools, itertools, heapq, bisect, math, random, string\nwith contextlib.redirect_stdout(sys.stderr):\n    exec(open("solution.py").read(), globals())\n    candidate = {target}\nfor line in sys.stdin:\n    args = json.loads(line)\n    with contextlib.redirect_stdout(sys.stderr):\n        result = candidate(*args)\n    print(json.dumps(result, allow_nan=False), flush=True)\n'
+
+
 def render_worker(problem, language):
-    # Flat (problem, language) row carries its single interface; python is handled
-    # by worker.tpl in the adapter (unified here too if desired).
+    """Generate the native JSON-lines runner source (worker.py / runner.<lang>)
+    for a (problem, language) flat row."""
     interface = problem["interface"]
     params = interface["parameters"]
     names = ", ".join(f"arg{i}" for i in range(len(params)))
     call = interface["callable"]
     container = interface.get("container")
+
+    if language == "python":
+        target = f"{container}().{call}" if container else call
+        return python_src.format(target=target)
+
     if language == "cpp":
         declarations = "\n".join(
             f"auto arg{i} = args.at({i}).get<{p['type'].replace('&', '').replace('const ', '').strip()}>();"

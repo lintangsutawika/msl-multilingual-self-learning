@@ -42,6 +42,7 @@ SOURCE_FILES = {
     "ruby": "solution.rb",
 }
 ADAPTERS = {
+    "python": "worker.py",
     "cpp": "runner.cpp",
     "go": "runner.go",
     "java": "Runner.java",
@@ -306,32 +307,12 @@ def generate(
     (task / "tests/config.json").write_text(json.dumps({"language": language, "parameter_names": names}))
     (task / "tests/canonical_test.py").write_text(row["canonical_tests"]["source"])
 
-    # Native runner/worker.
-    if language == "python":
-        target = (f"{interface['container']}()." if interface.get("container") else "") + interface["callable"]
-        worker_tpl = (PKG / "task-template-python/environment/files/adapters/worker.tpl").read_text()
-        (task / "environment/files/adapters/worker.py").write_text(worker_tpl.replace("TARGET", target))
-    else:
-        adapter_dir = (
-            task
-            / "environment"
-            / "files"
-            / "adapters"
-        )
+    # Native runner/worker (unified: python -> worker.py, others -> runner.<lang>).
+    adapter_dir = task / "environment" / "files" / "adapters"
+    adapter_dir.mkdir(parents=True, exist_ok=True)
+    filename = ADAPTERS[language]
+    (adapter_dir / filename).write_text(render_worker(row, language))
 
-        adapter_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        filename = ADAPTERS[language]
-
-        (adapter_dir / filename).write_text(
-            render_worker(
-                row,
-                language,
-            )
-        )
     return task
 
 
