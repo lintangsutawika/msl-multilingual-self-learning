@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .native_adapters import render_worker
+from .runners import render_worker
 
 LANGUAGES = (
     "python",
