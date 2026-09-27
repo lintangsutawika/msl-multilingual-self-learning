@@ -3,7 +3,9 @@ from __future__ import annotations
 
 
 def render_worker(problem, language):
-    interface = problem["interfaces"][language]
+    # Flat (problem, language) row carries its single interface; python is handled
+    # by worker.tpl in the adapter (unified here too if desired).
+    interface = problem["interface"]
     params = interface["parameters"]
     names = ", ".join(f"arg{i}" for i in range(len(params)))
     call = interface["callable"]
