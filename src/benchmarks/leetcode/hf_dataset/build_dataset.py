@@ -39,8 +39,8 @@ import requests
 from pathlib import Path
 from typing import Any
 
-from src.benchmarks.leetcode.interfaces.derive import parse_hf_python_signature
-from src.benchmarks.leetcode.interfaces.leetcode import (
+from src.benchmarks.leetcode.hf_dataset.derive import parse_hf_python_signature
+from src.benchmarks.leetcode.hf_dataset.parsers import (
     LANGUAGE_SLUGS,
     parse_leetcode_interface,
 )
