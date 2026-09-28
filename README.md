@@ -82,7 +82,12 @@ src/benchmarks/leetcode/task-template-<language>/environment/Dockerfile
 ```
 
 The build script writes `leetcode-<language>.sif` for all nine languages (or only the languages named as arguments) to `$LEETCODE_IMAGE_DIR` (default `/data/user_data/$USER/msl-images/`), replacing existing images. The JavaScript and TypeScript images include the libraries LeetCode provides to
-those languages (`@datastructures-js/priority-queue` v6, `queue`, `deque`and `lodash`), available to solutions as globals.
+those languages (`@datastructures-js/priority-queue` v6, `queue`, `deque`
+and `lodash`), available to solutions as globals. Every image also contains
+what Harbor's Singularity bootstrap needs (its `/opt/harbor-server` venv with
+uvicorn/fastapi, `tmux`, `asciinema`); without them each trial downloads these
+at start and, under load, exceeds the environment start timeout. Rebuild
+images built before this change.
 
 ### Running an agent
 

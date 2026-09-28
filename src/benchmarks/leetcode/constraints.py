@@ -560,7 +560,8 @@ def main() -> None:
     args = parser.parse_args()
 
     wanted = {int(q["question_id"]) for q in json.loads((SPLIT_DIR / f"{args.set}.json").read_text())["questions"]}
-    problems = [json.loads(line) for line in args.dataset.read_text().splitlines() if line.strip()]
+    # Split on newlines only: problem text can contain U+2028 and other characters splitlines() breaks on.
+    problems = [json.loads(line) for line in args.dataset.read_text().split("\n") if line.strip()]
     problems = sorted((p for p in problems if int(p["question_id"]) in wanted), key=lambda p: int(p["question_id"]))
     if args.fetch:
         fetch_content([int(p["question_id"]) for p in problems], args.content_dir)

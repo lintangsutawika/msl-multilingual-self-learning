@@ -10,6 +10,8 @@ cd "$(dirname "$0")/../.."
 
 IMAGE_DIR="${LEETCODE_IMAGE_DIR:-/data/user_data/$USER/msl-images}"
 CONTAINER_BIN="${CONTAINER_BIN:-$(command -v apptainer || command -v singularity)}"
+# The venv's python directly: `uv run` may first re-sync the venv and block on its lock.
+PYTHON="${PYTHON:-.venv/bin/python}"
 
 if [[ $# -gt 0 ]]; then
   LANGUAGES=("$@")
@@ -29,7 +31,7 @@ for lang in "${LANGUAGES[@]}"; do
   # and nothing reading the old image sees a partial file.
   tmp_sif="$sif_file.building"
   rm -f "$tmp_sif" "$tmp_sif.def"
-  uv run python -c "
+  "$PYTHON" -c "
 import sys
 from pathlib import Path
 from src.benchmarks.leetcode.adapter import prebuild_sif

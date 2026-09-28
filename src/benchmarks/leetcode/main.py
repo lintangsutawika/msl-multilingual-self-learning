@@ -43,9 +43,11 @@ SET_LANGUAGES = {
 
 
 def load_problems(dataset: Path) -> list[dict]:
+    # Split on newlines only: problem text can contain U+2028 and other
+    # characters that str.splitlines() also treats as line breaks.
     return [
         json.loads(line)
-        for line in dataset.read_text().splitlines()
+        for line in dataset.read_text().split("\n")
         if line.strip()
     ]
 
@@ -255,12 +257,20 @@ def main() -> None:
                 for qid in missing[:10]
             )
 
-            raise SystemExit(
+            message = (
                 f"Dataset {args.dataset} does not contain "
                 f"{len(missing)} question(s) required by set {args.set}. "
-                f"First missing IDs: {preview}. "
-                "Generate/use the corresponding execution dataset first."
+                f"First missing IDs: {preview}."
             )
+            # Problems whose interfaces could not be parsed never reach the
+            # dataset; with --skip-unsupported they are left out like other
+            # unsupported problems instead of aborting generation.
+            if not args.skip_unsupported:
+                raise SystemExit(
+                    message
+                    + " Generate/use the corresponding execution dataset first."
+                )
+            print(f"WARNING: {message} Skipping them.")
 
         problems = [
             problem

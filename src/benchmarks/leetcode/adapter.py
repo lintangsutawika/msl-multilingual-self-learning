@@ -546,7 +546,9 @@ def generate_all(
                     continue
                 try:
                     generate(row, language, staged, images.get(language), with_oracle)
-                except NotImplementedError as exc:
+                # NotImplementedError: unsupported transport; ValueError: the dataset's
+                # canonical tests and native interface disagree (e.g. parameter counts).
+                except (NotImplementedError, ValueError) as exc:
                     if not skip_unsupported:
                         raise
                     exclusions.append({"question_id": row["question_id"], "language": language, "reason": str(exc)})
