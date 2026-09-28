@@ -7,11 +7,11 @@
     "--enable-prefix-caching",
     "--enforce-eager",
     "--trust-remote-code",
-    "--enable-expert-parallel",
+    "--dtype", "bfloat16",
     "--enable-auto-tool-choice",
     "--tool-call-parser", "k2_horizon",
     "--reasoning-parser", "k2_horizon",
-    "--max-model-len", "131072"
+    "--chat-template-content-format", "string"
   ],
   "spec_config": null,
   "max_model_len": 131072,
