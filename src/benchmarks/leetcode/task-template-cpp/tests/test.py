@@ -30,13 +30,29 @@ class CompileError(RuntimeError):
     pass
 
 
+def _load_source(language):
+    """Return the agent's source code for `language`, packaging it into
+    solution.json when absent (was tests/_package_submission.py)."""
+    target = WORKSPACE / "solution.json"
+    if target.exists():
+        try:
+            sub = json.loads(target.read_text())
+            if sub.get("language") == language and isinstance(sub.get("code"), str) and sub["code"].strip():
+                return sub["code"]
+        except Exception:
+            pass
+    src = WORKSPACE / FILES[language]
+    if not src.exists():
+        raise ValueError(f"source not found: {src}")
+    code = src.read_text().strip()
+    if not code:
+        raise ValueError(f"source empty: {src}")
+    target.write_text(json.dumps({"language": language, "code": code}))
+    return code
+
+
 def prepare(language):
-    submission = json.loads((WORKSPACE / "solution.json").read_text())
-    if submission.get("language") != language:
-        raise ValueError("Submission language does not match task language")
-    code = submission.get("code")
-    if not isinstance(code, str) or not code.strip():
-        raise ValueError("Submission must contain nonempty source code")
+    code = _load_source(language)
     (WORKSPACE / FILES[language]).write_text(code)
     worker = ADAPTERS / {
         "python": "worker.py",

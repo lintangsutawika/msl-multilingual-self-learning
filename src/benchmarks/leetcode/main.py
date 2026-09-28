@@ -22,24 +22,7 @@ from pathlib import Path
 from .adapter import LANGUAGES, generate_all
 
 
-DEFAULT_DATASET = Path(
-    "benchmarks/leetcode/data/leetcode_multilingual_leetcode.jsonl"
-)
 DEFAULT_OUTPUT = Path("benchmarks/leetcode/tasks")
-SPLIT_DIR = Path("benchmarks/leetcode/data/splits")
-
-MAIN_4_LANGUAGES = (
-    "python",
-    "cpp",
-    "go",
-    "java",
-)
-
-SET_LANGUAGES = {
-    "a1": LANGUAGES,
-    "a2": MAIN_4_LANGUAGES,
-    "b": LANGUAGES,
-}
 
 
 def load_problems(dataset: Path) -> list[dict]:
@@ -50,21 +33,13 @@ def load_problems(dataset: Path) -> list[dict]:
     ]
 
 
-def load_split_ids(name: str) -> set[int]:
-    path = SPLIT_DIR / f"{name}.json"
-
-    if not path.is_file():
-        raise SystemExit(
-            f"Split manifest not found: {path}. "
-            "Run: uv run python -m src.benchmarks.leetcode.write_splits"
-        )
-
-    payload = json.loads(path.read_text())
-
-    return {
-        int(question["question_id"])
-        for question in payload["questions"]
-    }
+def load_problems_hf_or_file(dataset: Path | None, split: str) -> list[dict]:
+    """Return problem rows: an explicit --dataset JSONL if given, else the
+    hosted neulab/leetcode dataset (pulled)."""
+    if dataset is not None:
+        return load_problems(dataset)
+    from .dataset import load_problems_hf
+    return load_problems_hf(split)
 
 
 def _resolve_langs(value: str | None) -> tuple[str, ...]:
@@ -100,23 +75,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument(
         "--set",
-        choices=("a1", "a2", "b"),
+        choices=("train", "test"),
         default=None,
         help=(
             "Prepared benchmark set: "
-            "a1=full 9-language universe, "
-            "a2=full 4-language universe, "
-            "b=LeetCodeDataset test split in all 9 languages."
+            "train=all-9-language universe (train pool), "
+            "test=held-out eval subset of train."
         ),
     )
 
     parser.add_argument(
         "--dataset",
         type=Path,
-        default=DEFAULT_DATASET,
+        default=None,
         help=(
-            "Path to the multilingual execution JSONL "
-            f"(default: {DEFAULT_DATASET})."
+            "Path to a pre-built execution JSONL. If omitted, problems are built "
+            "live from newfacade/LeetCodeDataset for the split (test for set "
+            "a1/a2/b, train for set train)."
         ),
     )
 
@@ -151,15 +126,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         action="append",
         help="Generate only this question ID (repeatable).",
-    )
-
-    parser.add_argument(
-        "--with-oracle",
-        action="store_true",
-        help=(
-            "Also emit a reference solution/solution.json "
-            "(needs Doocs checkout)."
-        ),
     )
 
     parser.add_argument(
@@ -209,54 +175,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
 
+    languages = _resolve_langs(args.lang)   # default = LANGUAGES (all 9), like SET_LANGUAGES
     if args.set is not None:
-        default_languages = SET_LANGUAGES[args.set]
-
-        if args.lang is None:
-            languages = tuple(default_languages)
-        else:
-            languages = _resolve_langs(args.lang)
-
-        if args.output_dir is None:
-            output_dir = Path(
-                f"benchmarks/leetcode/tasks-{args.set}"
-            )
-        else:
-            output_dir = args.output_dir
+        output_dir = (
+            Path(f"benchmarks/leetcode/tasks-{args.set}")
+            if args.output_dir is None
+            else args.output_dir
+        )
     else:
-        languages = _resolve_langs(args.lang)
         output_dir = args.output_dir or DEFAULT_OUTPUT
 
-    problems = load_problems(args.dataset)
-
-    if args.set is not None:
-        wanted = load_split_ids(args.set)
-
-        available = {
-            int(problem["question_id"])
-            for problem in problems
-        }
-
-        missing = sorted(wanted - available)
-
-        if missing:
-            preview = ", ".join(
-                str(qid)
-                for qid in missing[:10]
-            )
-
-            raise SystemExit(
-                f"Dataset {args.dataset} does not contain "
-                f"{len(missing)} question(s) required by set {args.set}. "
-                f"First missing IDs: {preview}. "
-                "Generate/use the corresponding execution dataset first."
-            )
-
-        problems = [
-            problem
-            for problem in problems
-            if int(problem["question_id"]) in wanted
-        ]
+    # Map --set to an HF split: train -> train, test -> test.
+    _split = args.set if args.set in ("train", "test") else "test"
+    problems = load_problems_hf_or_file(args.dataset, _split)
 
     if args.question_id:
         wanted = set(args.question_id)
@@ -277,6 +208,14 @@ def main() -> None:
             raise SystemExit(
                 f"Question ID(s) absent from selected dataset/set: {missing}"
             )
+
+    # --lang filters the flat per-(problem, language) rows.
+    if languages:
+        problems = [
+            problem
+            for problem in problems
+            if problem.get("language") in languages
+        ]
 
     problems.sort(
         key=lambda problem: int(problem["question_id"])
@@ -354,9 +293,7 @@ def main() -> None:
     exclusions, count = generate_all(
         problems,
         output=output_dir,
-        languages=languages,
         images=images,
-        with_oracle=args.with_oracle,
         skip_unsupported=args.skip_unsupported,
     )
 
