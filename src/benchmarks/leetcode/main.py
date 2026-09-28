@@ -19,16 +19,18 @@ import os
 import shutil
 from pathlib import Path
 
-from .adapter import LANGUAGES, generate_all
+from .adapter import LANGUAGES, generate_all, invalid_tests_path, load_invalid_tests
 
 
 DEFAULT_OUTPUT = Path("benchmarks/leetcode/tasks")
 
 
 def load_problems(dataset: Path) -> list[dict]:
+    # Split on newlines only: problem text can contain U+2028 and other
+    # characters that str.splitlines() also treats as line breaks.
     return [
         json.loads(line)
-        for line in dataset.read_text().splitlines()
+        for line in dataset.read_text().split("\n")
         if line.strip()
     ]
 
@@ -138,6 +140,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--invalid-tests",
+        type=Path,
+        default=None,
+        help=(
+            "Constraint audit listing invalid test cases to drop for every language "
+            "(default: benchmarks/leetcode/data/invalid_tests_<split>.json; see constraints.py)."
+        ),
+    )
+
+    parser.add_argument(
         "--image-dir",
         type=Path,
         default=None,
@@ -209,20 +221,17 @@ def main() -> None:
                 f"Question ID(s) absent from selected dataset/set: {missing}"
             )
 
-    # --lang filters the flat per-(problem, language) rows.
-    if languages:
-        problems = [
-            problem
-            for problem in problems
-            if problem.get("language") in languages
-        ]
-
+    # --lang selects which flat per-(problem, language) rows become tasks; all
+    # language rows of a selected problem stay, because test filtering looks at
+    # every language's declared types (so the kept tests do not depend on --lang).
     problems.sort(
         key=lambda problem: int(problem["question_id"])
     )
 
     if args.limit is not None and args.limit >= 0:
-        problems = problems[: args.limit]
+        selected = [p for p in problems if p.get("language") in languages][: args.limit]
+        keep = {int(p["question_id"]) for p in selected}
+        problems = [p for p in problems if int(p["question_id"]) in keep]
 
     if output_dir.exists():
         raise SystemExit(
@@ -290,11 +299,20 @@ def main() -> None:
         except Exception:
             raise
 
+    invalid_path = args.invalid_tests or invalid_tests_path(_split)
+    if not invalid_path.is_file():
+        raise SystemExit(
+            f"Constraint audit not found: {invalid_path}. Run: "
+            f"uv run python -m src.benchmarks.leetcode.constraints --split {_split} --fetch"
+        )
+
     exclusions, count = generate_all(
         problems,
         output=output_dir,
         images=images,
         skip_unsupported=args.skip_unsupported,
+        invalid_tests=load_invalid_tests(invalid_path),
+        languages=languages,
     )
 
     # Move prebuilt sifs into the task dir now that generation succeeded.
