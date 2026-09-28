@@ -3,9 +3,10 @@
 This is the PREP step (build once, push to HF). It fetches raw LeetCode rows from
 newfacade/LeetCodeDataset, pulls per-language codeSnippets via LeetCode GraphQL,
 constructs the 9-language `interfaces` + `canonical_tests` per problem, flattens to
-one row per (problem, language), and writes `data/<split>/<lang>.jsonl` (one JSONL
-per language so every file stays under HF's 10 MiB limit; HF globs them into one
-split). After `git push`, `datasets.load_dataset("neulab/leetcode", split=...)`
+one row per (problem, language), and writes `data/<split>/<lang>-NNN.jsonl`
+(row-boundary shards so every file stays under HF's ~10 MiB per-file ceiling; HF
+globs them into one split). After `git push`,
+`datasets.load_dataset("neulab/leetcode", split=...)`
 returns the rows, which dataset.py pulls at generation time.
 """
 from __future__ import annotations
@@ -36,6 +37,7 @@ from dataclasses import dataclass
 from datasets import load_dataset
 
 import requests
+import time
 from pathlib import Path
 from typing import Any
 
@@ -282,12 +284,39 @@ _GRAPHQL_HEADERS = {
 }
 
 
-def _fetch_snippets(question_id: int, title_slug: str) -> dict[str, str] | None:
-    """Fetch a problem's per-language codeSnippets from LeetCode and cache them.
+# One-time train/full builds hit LeetCode's GraphQL repeatedly; pace requests and
+# back off on rate-limits so we don't get dropped by transient 429s/5xx. Resume is
+# provided by the per-question snippet cache: a re-run skips already-cached IDs.
+_RATE_DELAY = 3.0          # seconds between GraphQL requests (set via --rate-delay)
+_SNIP_MAX_RETRIES = 5      # backoff attempts before giving up on one question
+_SNIP_BASE_BACKOFF = 2.0   # first retry backoff (seconds); doubles each attempt
 
-    Returns {langSlug: code} or None on any failure. Caches the raw snippet record
-    under leetcode_snippets/<qid>.json so repeat builds don't re-hit the API.
+
+def _paced_via_cache(question_id: int) -> dict[str, str] | None:
+    """Return cached snippets for question_id, or None if not cached yet."""
+    cached = LEETCODE_SNIPPET_CACHE / f"{question_id}.json"
+    if cached.is_file():
+        try:
+            rec = json.loads(cached.read_text("utf-8"))
+            return {sn["langSlug"]: sn["code"] for sn in rec.get("code_snippets", [])}
+        except (OSError, ValueError):
+            pass  # corrupt cache entry -> re-fetch
+    return None
+
+
+def _fetch_snippets(question_id: int, title_slug: str) -> dict[str, str] | None:
+    """Fetch a problem's per-language codeSnippets from LeetCode with rate-limit
+    + backoff, and cache them.
+
+    Returns {langSlug: code} on success, or None after exhausting retries (the
+    caller records a skip). Caches the raw snippet record under
+    leetcode_snippets/<qid>.json so repeat builds don't re-hit the API and failed
+    runs resume from where they stopped.
     """
+    cached = _paced_via_cache(question_id)
+    if cached is not None:
+        return cached
+
     query = {
         "query": (
             "query questionData($titleSlug: String!) { "
@@ -296,31 +325,43 @@ def _fetch_snippets(question_id: int, title_slug: str) -> dict[str, str] | None:
         ),
         "variables": {"titleSlug": title_slug},
     }
-    try:
-        resp = requests.post(
-            _GRAPHQL_URL,
-            json=query,
-            headers=_GRAPHQL_HEADERS,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        qn = (resp.json().get("data") or {}).get("question") or {}
-        snippets = qn.get("codeSnippets")
-        if not snippets:
-            return None
-    except Exception:
+    snippets = None
+    for attempt in range(_SNIP_MAX_RETRIES):
+        try:
+            resp = requests.post(
+                _GRAPHQL_URL,
+                json=query,
+                headers=_GRAPHQL_HEADERS,
+                timeout=30,
+            )
+            if resp.status_code == 429 or resp.status_code >= 500:
+                retry_after = float(resp.headers.get("Retry-After", 0) or 0)
+                backoff = retry_after or _SNIP_BASE_BACKOFF * (2 ** attempt)
+                print(f"    rate-limited (HTTP {resp.status_code}); "
+                      f"backing off {backoff:.0f}s")
+                time.sleep(backoff)
+                continue
+            resp.raise_for_status()
+            qn = (resp.json().get("data") or {}).get("question") or {}
+            snippets = qn.get("codeSnippets")
+            break
+        except requests.RequestException:
+            # transient network error: brief backoff then retry
+            time.sleep(_SNIP_BASE_BACKOFF * (2 ** attempt))
+            continue
+
+    if not snippets:
         return None
 
-    record = {
-        "question_id": question_id,
-        "code_snippets": snippets,
-    }
+    record = {"question_id": question_id, "code_snippets": snippets}
     out = LEETCODE_SNIPPET_CACHE / f"{question_id}.json"
     try:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass  # cache is best-effort; interfaces still usable this run
+
+    time.sleep(_RATE_DELAY)  # pace between successful fetches
     return {sn["langSlug"]: sn["code"] for sn in snippets}
 
 
@@ -445,28 +486,45 @@ def _build_record(
 SPLITS = ("train", "test")
 
 
-def build_problems_hf(split: str = "test") -> "list[dict]":
+def build_problems_hf(
+    split: str = "test",
+    *,
+    rate_delay: float = 3.0,
+    limit: int | None = None,
+) -> "list[dict]":
     """Build post-interface rows for a split via HF newfacade + LeetCode GraphQL.
 
     This is the PREP step: it fetches codeSnippets + interfaces and returns the
-    (nested) per-problem records. The dataset is then flattened and written as JSONL
-    for the HF push.
+    (nested) per-problem records, then flatten + JSONL happens downstream. Requests
+    are throttled (--rate-delay) with backoff so one-time train/full builds don't
+    trip LeetCode rate limits; the per-question snippet cache makes re-runs resume.
+    `limit` caps how many problems are processed (for smoke-testing a subset).
     """
+    global _RATE_DELAY
+    _RATE_DELAY = rate_delay
+
     if split == "train":
         problems = load_train_split()
     else:
         problems = load_test_split()
+    if limit is not None:
+        problems = problems[:limit]
 
     records: list[dict] = []
     skipped = []
-    for problem in problems:
+    total = len(problems)
+    for idx, problem in enumerate(problems, start=1):
+        qid = _problem_value(problem, "question_id")
+        print(f"[{split}] {idx}/{total} qid={qid}", flush=True)
         interfaces = _resolve_all_interfaces(problem)
         if interfaces is None:
-            skipped.append((_problem_value(problem, "question_id"), _problem_value(problem, "task_id")))
+            skipped.append((qid, _problem_value(problem, "task_id")))
             continue
         records.append(_build_record(problem, interfaces))
     if not records:
         raise RuntimeError("No problems with complete LeetCode interfaces were generated")
+    if skipped:
+        print(f"[{split}] skipped {len(skipped)} (no complete interface): {skipped}")
     return records
 
 
@@ -487,8 +545,20 @@ def flatten(records):
     return flat
 
 
-def build(split, out):
-    records = build_problems_hf(split)
+def _clean_json_line(r) -> str:
+    """Serialize a row to a single JSONL line, escaping raw line-separator chars
+    (U+0085/U+2028/U+2029/CR) that HF's line reader would otherwise split on."""
+    line = __import__("json").dumps(r, ensure_ascii=False)
+    for ch, esc in (("\x85", "\\u0085"),
+                    ("\u2028", "\\u2028"),
+                    ("\u2029", "\\u2029"),
+                    ("\r", "\\r")):
+        line = line.replace(ch, esc)
+    return line + "\n"
+
+
+def build(split, out, *, rate_delay=3.0, limit=None, shard_mb=8):
+    records = build_problems_hf(split, rate_delay=rate_delay, limit=limit)
     if not records:
         return
     flat = flatten(records)
@@ -498,13 +568,31 @@ def build(split, out):
     for row in flat:
         by_lang.setdefault(row.get("language"), []).append(row)
     total = 0
+    shard_bytes = shard_mb * 1024 * 1024
     for lang, rows in sorted(by_lang.items()):
-        path = split_dir / f"{lang}.jsonl"
-        with path.open("w", encoding="utf-8") as fh:
-            for r in rows:
-                fh.write(__import__("json").dumps(r, ensure_ascii=False) + "\n")
+        # Write rows as row-boundary shards so every file stays well under HF's
+        # ~10 MiB per-file ceiling; HF globs data/<split>/*.jsonl into one split.
+        shard_idx = 0
+        fh = None
+        used = 0
+        n_shard = 0
+        for r in rows:
+            line = _clean_json_line(r)
+            if fh is None or (used > 0 and used + len(line) > shard_bytes):
+                if fh is not None:
+                    fh.close()
+                fh = (split_dir / f"{lang}-{shard_idx:03d}.jsonl").open("w", encoding="utf-8")
+                shard_idx += 1
+                used = 0
+                n_shard += 1
+            fh.write(line)
+            used += len(line)
+        if fh is not None:
+            fh.close()
         total += len(rows)
-        print(f"[build] {split}/{lang}: {len(rows)} rows -> {path}")
+        files = sorted(split_dir.glob(f"{lang}-*.jsonl"))
+        print(f"[build] {split}/{lang}: {len(rows)} rows "
+              f"(sharded {n_shard}: {', '.join(f.name for f in files)})")
     print(f"[build] {split}: {len(flat)} problems -> {total} rows total")
 
 
@@ -520,9 +608,10 @@ task_categories:
 # LeetCode multilingual benchmark dataset
 
 Post-interface rows for the msl-multilingual-self-learning benchmark, flattened to
-one row per (problem, language), stored as `data/<split>/<lang>.jsonl` (one JSONL
-per language so each file stays under HF's 10 MiB limit; HF globs them into a single
-split). Each row has the `interface` for its `language`, plus the shared
+one row per (problem, language), stored as `data/<split>/<lang>-NNN.jsonl`
+(row-boundary shards so every file stays under HF's ~10 MiB per-file ceiling; HF
+globs them into a single split). Each row has the `interface` for its `language`,
+plus the shared
 `canonical_tests` oracle, `problem_description`, and `metadata`.
 
 ## Load
@@ -537,13 +626,25 @@ test  = load_dataset("neulab/leetcode", split="test")
 
 def main():
     import argparse
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Prep a LeetCode split into per-language JSONL for the HF "
+                    "dataset push (throttled GraphQL fetch; resumable via cache)."
+    )
     ap.add_argument("--out", type=Path, default=Path("/home/aci18914wh/leetcode"))
-    ap.add_argument("--only", choices=SPLITS, default=None)
+    ap.add_argument("--only", choices=SPLITS, default=None,
+                    help="Build only this split (default: all splits).")
+    ap.add_argument("--rate-delay", type=float, default=3.0,
+                    help="Seconds between GraphQL requests (default 3.0).")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="Process only the first N problems (smoke-test a subset).")
+    ap.add_argument("--shard-mb", type=float, default=8.0,
+                    help="Target max MiB per output file (default 8, under HF's ~10 "
+                         "MiB ceiling); rows are sliced on boundaries.")
     args = ap.parse_args()
     splits = (args.only,) if args.only else SPLITS
     for split in splits:
-        build(split, args.out)
+        build(split, args.out, rate_delay=args.rate_delay, limit=args.limit,
+              shard_mb=args.shard_mb)
     write_readme(args.out)
 
 
