@@ -2230,6 +2230,7 @@ dependencies = [
     { name = "harbor-singularity-hpc" },
     { name = "mini-swe-agent", extra = ["full"] },
     { name = "requests" },
+    { name = "tqdm" },
     { name = "vllm" },
 ]
 
@@ -2240,6 +2241,7 @@ requires-dist = [
     { name = "harbor-singularity-hpc", git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=9bdf48e6c98598ad88833cef3fbe8f6c583332ba" },
     { name = "mini-swe-agent", extras = ["full"], specifier = ">=2.4.5" },
     { name = "requests", specifier = ">=2.34.2" },
+    { name = "tqdm" },
     { name = "vllm", specifier = ">=0.28.0" },
 ]
 
