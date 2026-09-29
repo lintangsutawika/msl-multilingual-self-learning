@@ -175,15 +175,27 @@ def dockerfile_to_def(dockerfile: Path) -> str | None:
     return "\n".join(block) + "\n"
 
 
-def prebuild_sif(dockerfile: Path, out_sif: Path, *, container_bin: str = "singularity") -> Path:
+def prebuild_sif(
+    dockerfile: Path,
+    out_sif: Path,
+    *,
+    container_bin: str = "singularity",
+    force: bool = False,
+) -> Path:
     """Build a Singularity sif from a task Dockerfile (FROM + RUN/COPY/ENV deps).
 
     Writes a .def alongside out_sif, runs ``singularity build --fakeroot`` with the
     Dockerfile's dir as the build context (so COPY sources resolve), and returns
     out_sif. Raises CalledProcessError on a failed build.
+
+    Idempotent: if ``out_sif`` already exists and ``force`` is False, the build is
+    skipped and the existing sif is returned. Pass ``force=True`` to rebuild.
     """
     dockerfile = Path(dockerfile).resolve()
     out_sif = Path(out_sif).resolve()
+    if out_sif.is_file() and not force:
+        print(f"[prebuild] {out_sif.name} exists; skipping (--prebuild-force to rebuild)")
+        return out_sif
     out_sif.parent.mkdir(parents=True, exist_ok=True)
     base = dockerfile_to_def(dockerfile)
     # Base image = the Dockerfile's FROM (last non-comment FROM line).
@@ -224,11 +236,13 @@ def prebuild_language_sifs(
     *,
     template_dir: Path | None = None,
     container_bin: str = "singularity",
+    force: bool = False,
 ) -> dict[str, str]:
     """Build one sif per language from its template Dockerfile, into out_dir.
 
     Returns a dict {language: <sif path>} suitable for adapter.generate_all's
-    images arg (which becomes task.toml [environment].docker_image)."""
+    images arg (which becomes task.toml [environment].docker_image). Skips any
+    language whose sif already exists unless ``force`` is True (rebuild)."""
     template_dir = template_dir or PKG
     images: dict[str, str] = {}
     for lang in languages:
@@ -236,9 +250,8 @@ def prebuild_language_sifs(
         if not dockerfile.exists():
             raise FileNotFoundError(f"No template Dockerfile for {lang}: {dockerfile}")
         sif = Path(out_dir) / f"{lang}.sif"
-        prebuild_sif(dockerfile, sif, container_bin=container_bin)
+        prebuild_sif(dockerfile, sif, container_bin=container_bin, force=force)
         images[lang] = str(sif)
-        print(f"prebuilt {sif}")
     return images
 
 def generate(

@@ -168,6 +168,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Where prebuilt sifs are written (default: the task output dir).",
     )
+    parser.add_argument(
+        "--prebuild-force",
+        action="store_true",
+        help=(
+            "Rebuild sifs even if they already exist. By default an existing "
+            "sif is reused (skipped), so --prebuild-sif is idempotent."
+        ),
+    )
 
     return parser
 
@@ -277,7 +285,7 @@ def main() -> None:
         scratch.mkdir(parents=True, exist_ok=True)
         try:
             prebuilt_scratch = prebuild_language_sifs(
-                languages, scratch,
+                languages, scratch, force=args.prebuild_force,
             )
             # Final sif lives alongside the tasks; task.toml references the
             # absolute final path (so it is correct after the move below).
