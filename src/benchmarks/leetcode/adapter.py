@@ -270,7 +270,15 @@ def generate(
 
     names = canonical_names(row)
     if len(names) != len(interface["parameters"]):
-        raise ValueError("Canonical/native parameter counts differ")
+        # A canonical/native parameter-count mismatch marks an unsupported
+        # object-transport interface (e.g. Java TreeNode/ListNode methods parse
+        # to empty params, or Rust tree methods expose a single Self root while
+        # the canonical signature has more). Treat it as unsupported so
+        # --skip-unsupported records it in exclusions.json instead of aborting.
+        raise NotImplementedError(
+            "Object transport is not supported yet "
+            "(canonical/native parameter counts differ)"
+        )
 
     task = output / f"{row['question_id']}-{language}"
     if task.exists():
@@ -343,10 +351,16 @@ def generate_all(
     images = images or {}
     output.parent.mkdir(parents=True, exist_ok=True)
     exclusions: list[dict[str, Any]] = []
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:  # tqdm not yet installed: fall back to a plain counter
+        def _tqdm(it, total=None, desc=None, unit="", **unused):  # type: ignore
+            return it
+
     with tempfile.TemporaryDirectory(dir=output.parent) as directory:
         staged = Path(directory) / "tasks"
         staged.mkdir()
-        for row in rows:
+        for row in _tqdm(rows, total=len(rows), desc="generating tasks", unit="task"):
             lang = row["language"]
             if row["question_id"] in OMITTED_QUESTIONS:
                 exclusions.append({"question_id": row["question_id"], "language": lang,
