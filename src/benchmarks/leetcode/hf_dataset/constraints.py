@@ -207,7 +207,7 @@ def constraint_items(content: str) -> list[str]:
     m = re.search(r"Constraints:(.*?)(</ul>|$)", content, re.S)
     if not m:
         return []
-    return [_plain(item) for item in re.findall(r"<li>(.*?)</li>", m.group(1), re.S)]
+    return [_plain(item) for item in re.findall(r"<li\b[^>]*>(.*?)</li>", m.group(1), re.S)]
 
 
 def element_names(content: str, params: set[str]) -> dict[str, str]:
@@ -335,21 +335,21 @@ def _charset(what: str) -> Callable[[Any], bool] | None:
     what_l = what.lower()
     quoted = re.findall(r"""'([^']*)'|"([^"]*)\"""", what)
     quoted = [a or b for a, b in quoted]
-    classes = []
-    for m in re.finditer(r"'(.)'\s*(?:to|-)\s*'(.)'", what):
-        classes.append(f"{re.escape(m.group(1))}-{re.escape(m.group(2))}")
-    m = re.search(r"\[\s*'(.)'\s*,\s*'(.)'\s*\]", what)
-    if m:
-        classes.append(f"{re.escape(m.group(1))}-{re.escape(m.group(2))}")
+    ranges = re.findall(r"'(.)'\s*(?:to|-)\s*'(.)'", what) + re.findall(r"\[\s*'(.)'\s*,\s*'(.)'\s*\]", what)
+    classes = [f"{re.escape(a)}-{re.escape(b)}" for a, b in ranges]
+    # An explicit range ("digits '0' to '4'", "letters 'a' to 'e'") narrows the generic word.
+    digit_range = any(a.isdigit() for a, _ in ranges)
+    letter_range = any(a.isalpha() for a, _ in ranges)
     lower = re.search(r"\blower[- ]?case\b", what_l)
     upper = re.search(r"\bupper[- ]?case\b", what_l)
-    if lower:
-        classes.append("a-z")
-    if upper:
-        classes.append("A-Z")
-    if re.search(r"\bletters?\b", what_l) and not lower and not upper:
-        classes.append("a-zA-Z")
-    if re.search(r"\b(?:digits?|integers?|numbers?|numeric)\b", what_l):
+    if not letter_range:
+        if lower:
+            classes.append("a-z")
+        if upper:
+            classes.append("A-Z")
+        if re.search(r"\bletters?\b", what_l) and not lower and not upper:
+            classes.append("a-zA-Z")
+    if re.search(r"\b(?:digits?|integers?|numbers?|numeric)\b", what_l) and not digit_range:
         classes.append("0-9")
     named = "".join(c for word, c in NAMED_CHARS.items() if re.search(rf"\b{word}\b", what_l))
     chars = "".join(set("".join(quoted) + named))
@@ -543,6 +543,8 @@ MANUAL_CHECKS: dict[int, dict[str, Check]] = {
         "The input is generated such that positions[i] != [kx, ky] for all 0 <= i < positions.length.":
             lambda e: [e["kx"], e["ky"]] not in e["positions"],
     },
+    3289: {"The input is generated such that nums contains exactly two repeated elements.":
+           lambda e: sorted(Counter(e["nums"]).values()).count(2) == 2 and max(Counter(e["nums"]).values()) == 2},
     3291: {"The input is generated such that sum(words[i].length) <= 10**(5).": lambda e: sum(map(len, e["words"])) <= 10**5},
     3292: {"The input is generated such that sum(words[i].length) <= 10**(5).": lambda e: sum(map(len, e["words"])) <= 10**5},
     3307: {"The input is generated such that word has at least k characters after all operations.":

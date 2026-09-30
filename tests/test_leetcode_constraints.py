@@ -69,6 +69,17 @@ class ConstraintTests(unittest.TestCase):
         self.assertTrue(grid({"board": [["a", "B"]]}))
         self.assertFalse(grid({"board": [["a", "1"]]}))
 
+    def test_explicit_ranges_narrow_generic_words(self):
+        digits = _auto_rule("s consists only of digits '0' to '4'.", {"s"}, {})
+        self.assertTrue(digits({"s": "0431"}))
+        self.assertFalse(digits({"s": "0451"}))
+        letters = _auto_rule("s consists only of lowercase English letters 'a' to 'e'.", {"s"}, {})
+        self.assertFalse(letters({"s": "abz"}))
+
+    def test_list_items_with_attributes_are_read(self):
+        page = '<p><strong>Constraints:</strong></p><ul><li data-stringify-border="0"><code>2 &lt;= n &lt;= 100</code></li></ul>'
+        self.assertEqual(constraint_items(page), ["2 <= n <= 100"])
+
     def test_vague_character_sets_are_not_checked(self):
         self.assertIsNone(_auto_rule("s consists of English letters, digits, symbols and spaces.", {"s"}, {}))
 
