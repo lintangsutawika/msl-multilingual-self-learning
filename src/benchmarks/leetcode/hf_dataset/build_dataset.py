@@ -13,7 +13,13 @@ and LeetCode's typed metaData. Then it cleans:
   interface in one of the 9 languages;
 * tests are dropped when they break the problem's current Constraints, do not
   fit a declared type in some language, or expect inf/nan (constraints.py);
-* problems left with fewer than MIN_VALID_TESTS tests are dropped.
+* problems left with fewer than MIN_VALID_TESTS tests are dropped, and so are
+  problems with several valid answers (they need a problem-specific checker).
+
+Answers that may come in any order, or are decimals, keep their tests but the
+asserts are rewritten to `answers_match(candidate(...), expected)` (defined in
+the same source: top-level order ignored, or 1e-5 tolerance), and
+canonical_tests.comparison records "unordered" / "float" / "exact".
 
 Every drop is recorded with its reason in reports/<split>.json, and problems
 whose answers need more than an exact comparison (any order, several valid
@@ -31,6 +37,7 @@ returns the rows, which dataset.py pulls at generation time.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import re
 from collections import Counter
@@ -137,6 +144,9 @@ def _problem_drops(question: dict[str, Any] | None, meta: dict[str, Any]) -> lis
 
 def _flags(text: str, interfaces: dict[str, Any], meta: dict[str, Any], images: int) -> list[str]:
     flags = [name for name, pattern in FLAG_PATTERNS.items() if pattern.search(text)]
+    # "rearrange the substrings in any order" describes the task, not the answer, unless a list is returned.
+    if "any_order" in flags and not interfaces.get("python", {}).get("return_type", "").startswith("List"):
+        flags.remove("any_order")
     returns = [meta.get("return", {}).get("type", "")]
     returns += [i["return_type"] for i in interfaces.values()]
     if any(DECIMAL_TYPES.search(t) for t in returns):
@@ -146,6 +156,56 @@ def _flags(text: str, interfaces: dict[str, Any], meta: dict[str, Any], images: 
     if meta.get("manual"):
         flags.append("leetcode_manual_judge")
     return flags
+
+
+# --- Answer comparison --------------------------------------------------------------
+# Problems whose answers an exact `==` would wrongly reject get their asserts rewritten to
+# `assert answers_match(candidate(...), expected)`, with the helper defined in the same
+# source, so anyone running check(candidate) compares correctly.
+
+COMPARISON_HELPERS = {
+    "unordered": '''def answers_match(result, expected):
+    """The answer may list its items in any order (only the top-level order is free)."""
+    if isinstance(result, list) and isinstance(expected, list):
+        return sorted(result, key=repr) == sorted(expected, key=repr)
+    return result == expected
+''',
+    "float": '''def answers_match(result, expected):
+    """Decimal answers are accepted within 1e-5 (absolute or relative), as on LeetCode."""
+    import math
+    if isinstance(result, list) and isinstance(expected, list):
+        return len(result) == len(expected) and all(answers_match(r, e) for r, e in zip(result, expected))
+    numbers = (int, float)
+    if isinstance(result, numbers) and isinstance(expected, numbers) and not isinstance(result, bool):
+        return math.isclose(result, expected, rel_tol=1e-5, abs_tol=1e-5)
+    return result == expected
+''',
+}
+
+
+def comparison_for(flags: list[str]) -> str:
+    if "decimal_answer" in flags:
+        return "float"
+    if "any_order" in flags:
+        return "unordered"
+    return "exact"
+
+
+class _UseAnswersMatch(ast.NodeTransformer):
+    def visit_Assert(self, node: ast.Assert) -> ast.Assert:
+        test = node.test
+        if (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.left, ast.Call) and getattr(test.left.func, "id", "") == "candidate"):
+            node.test = ast.Call(ast.Name("answers_match", ast.Load()), [test.left, test.comparators[0]], [])
+        return node
+
+
+def apply_comparison(source: str, comparison: str) -> str:
+    """The test source with its asserts using the comparison's answers_match (unchanged for exact)."""
+    if comparison == "exact":
+        return source
+    tree = _UseAnswersMatch().visit(ast.parse(source))
+    return COMPARISON_HELPERS[comparison] + "\n\n" + ast.unparse(tree) + "\n"
 
 
 # --- Build ----------------------------------------------------------------------
@@ -191,6 +251,9 @@ def build_problem(row: dict[str, Any], cache_dir: Path) -> tuple[dict[str, Any] 
     entry["unchecked_constraints"] = audit["unchecked"]
     if kept < MIN_VALID_TESTS:
         entry["drop"].append("too_few_tests")
+    if "multiple_answers" in entry["flags"]:
+        entry["drop"].append("multiple_answers")  # needs a problem-specific checker
+    entry["comparison"] = comparison_for(entry["flags"])
     if entry["drop"]:
         return None, entry
 
@@ -200,7 +263,11 @@ def build_problem(row: dict[str, Any], cache_dir: Path) -> tuple[dict[str, Any] 
         "difficulty": question.get("difficulty") or row["difficulty"],
         "problem_description": description.text,
         "interfaces": interfaces,
-        "canonical_tests": {"language": "python", "source": source},
+        "canonical_tests": {
+            "language": "python",
+            "source": apply_comparison(source, entry["comparison"]),
+            "comparison": entry["comparison"],
+        },
         "metadata": {
             "canonical_parameter_names": names,
             "leetcode_dataset_entry_point": row["entry_point"],
@@ -242,7 +309,7 @@ def summarize(split: str, report: list[dict]) -> str:
     anywhere = Counter(r for e in report for r in e["drop"])
     lines.append("  problems dropped, by reason (first reason / any reason):")
     for reason in ("not_crawled", "premium", "class_design", "tree_or_linked_list", "in_place", "interface",
-                   "too_few_tests"):
+                   "too_few_tests", "multiple_answers"):
         if anywhere[reason]:
             lines.append(f"    {reason:30} {first[reason]:5} / {anywhere[reason]}")
     tested = [e for e in report if "tests" in e]
@@ -257,6 +324,8 @@ def summarize(split: str, report: list[dict]) -> str:
     kept_tests = sum(e["tests"]["kept"] for e in kept)
     kept_dropped = sum(sum(e["tests"]["dropped"].values()) for e in kept)
     lines.append(f"  in kept problems: {kept_tests} tests kept, {kept_dropped} dropped")
+    comparisons = Counter(e["comparison"] for e in kept)
+    lines.append("  kept problems by answer comparison: " + ", ".join(f"{k} {v}" for k, v in comparisons.most_common()))
     flags = Counter(f for e in kept for f in e.get("flags", []))
     lines.append("  kept problems flagged for review:")
     for flag, count in flags.most_common():
@@ -332,7 +401,10 @@ the `problem_description` (from the LeetCode page) and `metadata`.
 
 Tests that break the problem's Constraints, do not fit a declared type in some
 language, or expect inf/nan were removed; problems that take trees or linked
-lists, modify their input in place, or kept fewer than 10 tests were dropped.
+lists, modify their input in place, have several valid answers, or kept fewer
+than 10 tests were dropped. Where answers may come in any order or are decimals,
+the asserts call `answers_match` (defined at the top of the test source), and
+`canonical_tests.comparison` says which rule applies ("unordered", "float" or "exact").
 `reports/<split>.json` lists every dropped problem and test with its reason.
 
 ## Load
