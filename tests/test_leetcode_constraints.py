@@ -1,7 +1,7 @@
 """Constraint audit: LeetCode's Constraints list becomes checks on canonical test inputs."""
 import unittest
 
-from src.benchmarks.leetcode.constraints import audit_problem, build_checks, constraint_items
+from src.benchmarks.leetcode.hf_dataset.constraints import _auto_rule, audit_problem, build_checks, constraint_items
 
 PAGE = """
 <p>You are given <code>queries</code> where <code>queries[i] = [l<sub>i</sub>, r<sub>i</sub>]</code>.</p>
@@ -50,6 +50,32 @@ class ConstraintTests(unittest.TestCase):
         self.assertIn("0 <= li < ri < n", violated["assert candidate(nums=[1, 2, 3], queries=[[2, 0]], s='ab') == 0"])
         self.assertEqual(violated["assert candidate(nums=[1, 2], queries=[[0, 1], [0, 1]], s='aB') == 0"],
                          {"s consists only of lowercase English letters.", "All queries[i] are unique."})
+
+    def test_character_set_wordings(self):
+        rules = [
+            ("s consists of only English letters (both uppercase and lowercase), digits (0-9), plus '+', minus '-', or dot '.'.",
+             "-1.5e+3", "1 2"),
+            ("path consists of English letters, digits, period '.', slash '/' or '_'.", "/home/a_b/..", "/a b"),
+            ("s consists of integers and operators ('+', '-', '*', '/') separated by some number of spaces.", " 3+5 / 2 ", "3+x"),
+            ("s consists of parentheses only '()[]{}'.", "([{}])", "(a)"),
+            ("s consists of English letters (lower-case and upper-case), ',' and '.'.", "Ab,c.", "a b"),
+        ]
+        for rule, good, bad in rules:
+            check = _auto_rule(rule, {"s", "path"}, {})
+            name = "path" if rule.startswith("path") else "s"
+            self.assertTrue(check({name: good}), rule)
+            self.assertFalse(check({name: bad}), rule)
+        grid = _auto_rule("board consists of only lowercase and uppercase English letters.", {"board"}, {})
+        self.assertTrue(grid({"board": [["a", "B"]]}))
+        self.assertFalse(grid({"board": [["a", "1"]]}))
+
+    def test_vague_character_sets_are_not_checked(self):
+        self.assertIsNone(_auto_rule("s consists of English letters, digits, symbols and spaces.", {"s"}, {}))
+
+    def test_neighbour_index_stays_inside_the_list(self):
+        check = _auto_rule("triangle[i].length == triangle[i - 1].length + 1", {"triangle"}, {})
+        self.assertTrue(check({"triangle": [[1], [2, 3], [4, 5, 6]]}))
+        self.assertFalse(check({"triangle": [[1], [2, 3], [4, 5]]}))
 
 
 if __name__ == "__main__":

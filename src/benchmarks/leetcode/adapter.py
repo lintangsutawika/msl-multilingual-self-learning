@@ -8,16 +8,14 @@ into the task. Mirrors material-harbor/matqna's adapter pattern.
 """
 from __future__ import annotations
 
-import ast
 import json
-import math
-import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from .hf_dataset.constraints import MIN_VALID_TESTS, canonical_names, filter_canonical_tests
 from .runners import render_worker
 
 LANGUAGES = (
@@ -58,163 +56,12 @@ ADAPTERS = {
 PKG = Path(__file__).parent
 
 
-def canonical_names(problem: dict[str, Any]) -> list[str]:
-    """Canonical parameter names for the shared Python judge."""
-    names = problem.get("metadata", {}).get("canonical_parameter_names")
-    if names is None:
-        names = [p["name"] for p in problem["interfaces"]["python"]["parameters"]]
-        for node in ast.walk(ast.parse(problem["canonical_tests"]["source"])):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "candidate":
-                if any(k.arg not in names for k in node.keywords):
-                    raise ValueError(
-                        "HF/Doocs parameter names differ; regenerate dataset to retain canonical_parameter_names"
-                    )
-    return names
-
-
 # Constraint audits of the canonical tests, one per split (see constraints.py).
 INVALID_TESTS_DIR = Path("benchmarks/leetcode/data")
 
 
 def invalid_tests_path(split: str) -> Path:
     return INVALID_TESTS_DIR / f"invalid_tests_{split}.json"
-
-
-# A problem needs this many fair test cases, or a wrong solution can pass by luck.
-MIN_VALID_TESTS = 10
-
-INT32_MAX = 2**31 - 1
-INT64_MAX = 2**63 - 1
-JS_SAFE_MAX = 2**53 - 1
-
-
-def integer_limit(language: str, type_name: str) -> int | None:
-    """Largest integer a declared LeetCode type holds exactly (None: unbounded or not an integer)."""
-    if language in ("python", "ruby"):
-        return None
-    if language in ("javascript", "typescript"):
-        return JS_SAFE_MAX
-    if language == "php":
-        return INT64_MAX
-    if language == "go":
-        return INT64_MAX if re.search(r"\bint(64)?\b", type_name) else None
-    if language == "rust":
-        return INT64_MAX if "i64" in type_name else INT32_MAX if "i32" in type_name else None
-    if re.search(r"\blong\b", type_name):
-        return INT64_MAX
-    if re.search(r"\b(int|Integer)\b", type_name):
-        return INT32_MAX
-    return None
-
-
-def _integers(value: Any):
-    if isinstance(value, bool):
-        return
-    if isinstance(value, int):
-        yield value
-    elif isinstance(value, (list, tuple)):
-        for item in value:
-            yield from _integers(item)
-
-
-def _non_finite(value: Any) -> bool:
-    if isinstance(value, float):
-        return not math.isfinite(value)
-    return isinstance(value, (list, tuple)) and any(_non_finite(item) for item in value)
-
-
-def _unrepresentable_languages(problem: dict[str, Any], args: list[Any], expected: Any) -> list[str]:
-    """Languages whose declared parameter/return types cannot hold this test case."""
-    if _non_finite(args) or _non_finite(expected):
-        # inf/nan cannot cross the JSON transport, so no language can pass.
-        return list(problem["interfaces"])
-    languages = []
-    for language, interface in problem["interfaces"].items():
-        pairs = list(zip((p["type"] for p in interface["parameters"]), args))
-        pairs.append((interface["return_type"], expected))
-        for type_name, value in pairs:
-            limit = integer_limit(language, type_name)
-            if limit is not None and any(not -limit - 1 <= x <= limit for x in _integers(value)):
-                languages.append(language)
-                break
-    return languages
-
-
-_ARITHMETIC_NODES = (
-    ast.Expression, ast.Constant, ast.List, ast.Tuple, ast.Load,
-    ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Pow, ast.USub, ast.UAdd,
-)
-# Names the reference solution's outputs may contain (the judge star-imports math).
-_TEST_NAMES = {"inf": math.inf, "nan": math.nan}
-
-
-def _test_value(node: ast.AST) -> Any:
-    """Value of a test argument: a literal, or plain arithmetic such as 10**9, [0] * n or -inf."""
-    try:
-        return ast.literal_eval(node)
-    except ValueError:
-        expression = ast.Expression(node)
-        for n in ast.walk(expression):
-            if not isinstance(n, _ARITHMETIC_NODES) and not (isinstance(n, ast.Name) and n.id in _TEST_NAMES):
-                raise
-        return eval(compile(expression, "<test>", "eval"), {"__builtins__": {}, **_TEST_NAMES})
-
-
-def filter_canonical_tests(
-    problem: dict[str, Any],
-    invalid: dict[str, list[str]] | None = None,
-) -> tuple[str, list[dict[str, Any]], int]:
-    """Drop test cases that are not fair for every language.
-
-    LeetCodeDataset generated its test inputs and recorded the Python
-    reference's output, so some cases break the problem's own contract:
-
-    * values that do not fit a declared LeetCode type (board values of 7e9
-      where LeetCode promises |x| <= 1e9 cannot even be received in
-      Rust/C++/Java's `int`), and expected outputs of inf/-inf (the reference's
-      sentinel), which no language can return;
-    * inputs that violate the problem's Constraints, listed in `invalid`
-      (assert source -> violated rules, from constraints.py's audit).
-
-    Such cases are removed for every language. Returns (source, dropped,
-    number of test cases kept).
-    """
-    invalid = invalid or {}
-    source = problem["canonical_tests"]["source"]
-    names = canonical_names(problem)
-    asserts = [
-        node for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Assert)
-        and isinstance(node.test, ast.Compare)
-        and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)
-        and isinstance(node.test.left, ast.Call)
-        and isinstance(node.test.left.func, ast.Name) and node.test.left.func.id == "candidate"
-    ]
-    dropped = []
-    for node in asserts:
-        test = ast.unparse(node)
-        if test in invalid:
-            dropped.append({"line": node.lineno, "end_line": node.end_lineno, "violates": invalid[test]})
-            continue
-        call = node.test.left
-        try:
-            values = [_test_value(a) for a in call.args]
-            keywords = {k.arg: _test_value(k.value) for k in call.keywords}
-            expected = _test_value(node.test.comparators[0])
-        except (ValueError, TypeError, SyntaxError, RecursionError):
-            continue
-        values += [keywords[n] for n in names[len(values):] if n in keywords]
-        if len(values) != len(names):
-            continue
-        languages = _unrepresentable_languages(problem, values, expected)
-        if languages:
-            dropped.append({"line": node.lineno, "end_line": node.end_lineno, "unrepresentable_in": languages})
-    kept = len(asserts) - len(dropped)
-    if not dropped:
-        return source, [], kept
-    removed = {n for d in dropped for n in range(d["line"], d["end_line"] + 1)}
-    lines = source.splitlines(keepends=True)
-    return "".join(line for n, line in enumerate(lines, 1) if n not in removed), dropped, kept
 
 
 def load_invalid_tests(path: Path) -> dict[int, dict[str, list[str]]]:

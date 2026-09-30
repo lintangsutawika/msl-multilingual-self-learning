@@ -1,27 +1,25 @@
-"""Audit canonical tests against LeetCode's own Constraints section.
+"""Decide which canonical tests are fair for every language.
 
 LeetCodeDataset generated its test inputs and recorded the Python reference
-solution's output, without checking the inputs against the problem's
-constraints. A test that breaks the contract has no well-defined answer and
-penalizes correct solutions that rely on the contract (fixed-size arrays in
-typed languages, "an answer always exists", ...), so it is not a fair test
-for any language.
+solution's output, without checking them against the problem. A test is
+dropped (for every language) when:
 
-Each <li> under "Constraints" on the LeetCode page becomes a check: common
-forms (ranges, lengths, character sets, uniqueness, ...) are parsed
-automatically; "The input is generated such that ..." guarantees have
-hand-written checks in MANUAL_CHECKS; rules that cannot be checked without
-solving the problem are listed in UNCHECKABLE. Rules matching none of these
-are reported as unchecked so they can be added.
+* its input breaks the problem's Constraints. Each <li> under "Constraints"
+  on the LeetCode page becomes a check: common forms (ranges, lengths,
+  character sets, uniqueness, ...) are parsed automatically; "The input is
+  generated such that ..." guarantees have hand-written checks in
+  MANUAL_CHECKS; rules that cannot be checked without solving the problem are
+  listed in UNCHECKABLE. Rules matching none of these are reported as
+  unchecked so they can be added;
+* a value does not fit a declared LeetCode type in some language (a 7e9 where
+  Rust/C++/Java take an `int`), or the expected output is inf/nan, which
+  cannot cross the JSON transport.
 
-    uv run python -m src.benchmarks.leetcode.constraints --split test --fetch
-
-writes benchmarks/leetcode/data/invalid_tests_<split>.json, which task
-generation uses to drop invalid tests for every language.
+build_dataset.py applies these checks, so the published dataset holds only
+fair tests.
 """
 from __future__ import annotations
 
-import argparse
 import ast
 import datetime
 import html
@@ -29,15 +27,8 @@ import itertools
 import json
 import math
 import re
-import time
 from collections import Counter
-from pathlib import Path
 from typing import Any, Callable
-
-from .adapter import _problem_view, _test_value, canonical_names, invalid_tests_path
-
-DEFAULT_CONTENT_DIR = Path("benchmarks/leetcode/data/cache/leetcode_content")
-GRAPHQL_URL = "https://leetcode.com/graphql"
 
 Check = Callable[[dict[str, Any]], bool]
 OPS = r"(<=|>=|==|!=|<|>)"
@@ -45,6 +36,160 @@ SAFE_BUILTINS = {
     "len": len, "all": all, "any": any, "range": range, "set": set, "sorted": sorted,
     "min": min, "max": max, "sum": sum, "abs": abs, "int": int, "floor": math.floor,
 }
+
+
+# --- Test values and types -----------------------------------------------
+
+def canonical_names(problem: dict[str, Any]) -> list[str]:
+    """Canonical parameter names for the shared Python judge."""
+    names = problem.get("metadata", {}).get("canonical_parameter_names")
+    if names is None:
+        names = [p["name"] for p in problem["interfaces"]["python"]["parameters"]]
+        for node in ast.walk(ast.parse(problem["canonical_tests"]["source"])):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "candidate":
+                if any(k.arg not in names for k in node.keywords):
+                    raise ValueError(
+                        "HF/Doocs parameter names differ; regenerate dataset to retain canonical_parameter_names"
+                    )
+    return names
+
+
+# A problem needs this many fair test cases, or a wrong solution can pass by luck.
+MIN_VALID_TESTS = 10
+
+INT32_MAX = 2**31 - 1
+INT64_MAX = 2**63 - 1
+JS_SAFE_MAX = 2**53 - 1
+
+
+def integer_limit(language: str, type_name: str) -> int | None:
+    """Largest integer a declared LeetCode type holds exactly (None: unbounded or not an integer)."""
+    if language in ("python", "ruby"):
+        return None
+    if language in ("javascript", "typescript"):
+        return JS_SAFE_MAX
+    if language == "php":
+        return INT64_MAX
+    if language == "go":
+        return INT64_MAX if re.search(r"\bint(64)?\b", type_name) else None
+    if language == "rust":
+        return INT64_MAX if "i64" in type_name else INT32_MAX if "i32" in type_name else None
+    if re.search(r"\blong\b", type_name):
+        return INT64_MAX
+    if re.search(r"\b(int|Integer)\b", type_name):
+        return INT32_MAX
+    return None
+
+
+def _integers(value: Any):
+    if isinstance(value, bool):
+        return
+    if isinstance(value, int):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _integers(item)
+
+
+def _non_finite(value: Any) -> bool:
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    return isinstance(value, (list, tuple)) and any(_non_finite(item) for item in value)
+
+
+def _unrepresentable_languages(problem: dict[str, Any], args: list[Any], expected: Any) -> list[str]:
+    """Languages whose declared parameter/return types cannot hold this test case."""
+    if _non_finite(args) or _non_finite(expected):
+        # inf/nan cannot cross the JSON transport, so no language can pass.
+        return list(problem["interfaces"])
+    languages = []
+    for language, interface in problem["interfaces"].items():
+        pairs = list(zip((p["type"] for p in interface["parameters"]), args))
+        pairs.append((interface["return_type"], expected))
+        for type_name, value in pairs:
+            limit = integer_limit(language, type_name)
+            if limit is not None and any(not -limit - 1 <= x <= limit for x in _integers(value)):
+                languages.append(language)
+                break
+    return languages
+
+
+_ARITHMETIC_NODES = (
+    ast.Expression, ast.Constant, ast.List, ast.Tuple, ast.Load,
+    ast.BinOp, ast.UnaryOp, ast.Add, ast.Sub, ast.Mult, ast.Pow, ast.USub, ast.UAdd,
+)
+# Names the reference solution's outputs may contain (the judge star-imports math).
+_TEST_NAMES = {"inf": math.inf, "nan": math.nan}
+
+
+def _test_value(node: ast.AST) -> Any:
+    """Value of a test argument: a literal, or plain arithmetic such as 10**9, [0] * n or -inf."""
+    try:
+        return ast.literal_eval(node)
+    except ValueError:
+        expression = ast.Expression(node)
+        for n in ast.walk(expression):
+            if not isinstance(n, _ARITHMETIC_NODES) and not (isinstance(n, ast.Name) and n.id in _TEST_NAMES):
+                raise
+        return eval(compile(expression, "<test>", "eval"), {"__builtins__": {}, **_TEST_NAMES})
+
+
+def filter_canonical_tests(
+    problem: dict[str, Any],
+    invalid: dict[str, list[str]] | None = None,
+) -> tuple[str, list[dict[str, Any]], int]:
+    """Drop test cases that are not fair for every language.
+
+    LeetCodeDataset generated its test inputs and recorded the Python
+    reference's output, so some cases break the problem's own contract:
+
+    * values that do not fit a declared LeetCode type (board values of 7e9
+      where LeetCode promises |x| <= 1e9 cannot even be received in
+      Rust/C++/Java's `int`), and expected outputs of inf/-inf (the reference's
+      sentinel), which no language can return;
+    * inputs that violate the problem's Constraints, listed in `invalid`
+      (assert source -> violated rules, from constraints.py's audit).
+
+    Such cases are removed for every language. Returns (source, dropped,
+    number of test cases kept).
+    """
+    invalid = invalid or {}
+    source = problem["canonical_tests"]["source"]
+    names = canonical_names(problem)
+    asserts = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Assert)
+        and isinstance(node.test, ast.Compare)
+        and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)
+        and isinstance(node.test.left, ast.Call)
+        and isinstance(node.test.left.func, ast.Name) and node.test.left.func.id == "candidate"
+    ]
+    dropped = []
+    for node in asserts:
+        test = ast.unparse(node)
+        if test in invalid:
+            dropped.append({"line": node.lineno, "end_line": node.end_lineno, "violates": invalid[test]})
+            continue
+        call = node.test.left
+        try:
+            values = [_test_value(a) for a in call.args]
+            keywords = {k.arg: _test_value(k.value) for k in call.keywords}
+            expected = _test_value(node.test.comparators[0])
+        except (ValueError, TypeError, SyntaxError, RecursionError):
+            continue
+        values += [keywords[n] for n in names[len(values):] if n in keywords]
+        if len(values) != len(names):
+            continue
+        languages = _unrepresentable_languages(problem, values, expected)
+        if languages:
+            dropped.append({"line": node.lineno, "end_line": node.end_lineno, "unrepresentable_in": languages})
+    kept = len(asserts) - len(dropped)
+    if not dropped:
+        return source, [], kept
+    removed = {n for d in dropped for n in range(d["line"], d["end_line"] + 1)}
+    lines = source.splitlines(keepends=True)
+    return "".join(line for n, line in enumerate(lines, 1) if n not in removed), dropped, kept
+
 
 
 # --- Page text ---------------------------------------------------------------
@@ -108,7 +253,9 @@ def _compile(expr: str, params: set[str], extra: dict[str, Any] | None = None) -
         if s1 == s2:
             body = f"({v1} == {v2}) or ({body})"
     for var, seq in reversed(loops):
-        body = f"all(({body}) for {var} in range(len({seq})))"
+        before = max([int(k) for k in re.findall(rf"\[\s*{var}\s*-\s*(\d+)\s*\]", expr)], default=0)
+        after = max([int(k) for k in re.findall(rf"\[\s*{var}\s*\+\s*(\d+)\s*\]", expr)], default=0)
+        body = f"all(({body}) for {var} in range({before}, len({seq}) - {after}))"
     tree = ast.parse(body, mode="eval")
     allowed = params | {v for v, _ in loops} | set(SAFE_BUILTINS) | set(extra or {})
     unknown = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} - allowed
@@ -165,30 +312,57 @@ def _learn_definitions(text: str, params: set[str], aliases: dict[str, str]) -> 
                 aliases[m.group(1)] = f"(({target_norm}) {inverse} {m.group(3)})"
 
 
-def _charset(what: str) -> tuple[str, Any] | None:
-    """Allowed characters or tokens from a description like "lowercase English letters"."""
+# Words for characters that rules name instead of quoting.
+NAMED_CHARS = {
+    "space": " ", "spaces": " ", "whitespace": " ", "parentheses": "()", "brackets": "[]", "braces": "{}",
+    "period": ".", "periods": ".", "dot": ".", "dots": ".", "slash": "/", "slashes": "/", "underscore": "_",
+    "comma": ",", "commas": ",", "plus": "+", "minus": "-", "hyphen": "-", "hyphens": "-", "dash": "-",
+    "asterisk": "*", "colon": ":", "semicolon": ";", "apostrophe": "'",
+}
+# Descriptions too vague to check ("symbols", "printable ASCII"): the rule is reported as unchecked.
+VAGUE_CHARSET = re.compile(r"\bsymbols?\b|printable|ascii|any characters?|special characters?|punctuation|non-?alpha", re.I)
+
+
+def _charset(what: str) -> Callable[[Any], bool] | None:
+    """A check for "consists of ..." descriptions like "lowercase English letters, digits and '_'".
+
+    Strings must consist of the allowed characters; lists (and grids) of
+    strings may also hold whole quoted tokens. None when the description is
+    not understood.
+    """
+    if VAGUE_CHARSET.search(what):
+        return None
     what_l = what.lower()
-    quoted = re.findall(r"""['"]([^'"]*)['"]""", what)
+    quoted = re.findall(r"""'([^']*)'|"([^"]*)\"""", what)
+    quoted = [a or b for a, b in quoted]
     classes = []
-    for m in re.finditer(r"'(.)' (?:to|-) '(.)'", what):
+    for m in re.finditer(r"'(.)'\s*(?:to|-)\s*'(.)'", what):
         classes.append(f"{re.escape(m.group(1))}-{re.escape(m.group(2))}")
     m = re.search(r"\[\s*'(.)'\s*,\s*'(.)'\s*\]", what)
     if m:
         classes.append(f"{re.escape(m.group(1))}-{re.escape(m.group(2))}")
-    if "lowercase" in what_l:
+    lower = re.search(r"\blower[- ]?case\b", what_l)
+    upper = re.search(r"\bupper[- ]?case\b", what_l)
+    if lower:
         classes.append("a-z")
-    if "uppercase" in what_l:
+    if upper:
         classes.append("A-Z")
-    if re.search(r"\bdigits?\b", what_l) and not classes:
+    if re.search(r"\bletters?\b", what_l) and not lower and not upper:
+        classes.append("a-zA-Z")
+    if re.search(r"\b(?:digits?|integers?|numbers?|numeric)\b", what_l):
         classes.append("0-9")
-    if classes:
-        extra = "".join(re.escape(q) for q in quoted if len(q) == 1 and not re.search(r"'.' (?:to|-) '.'", what))
-        return "chars", re.compile(f"[{''.join(classes)}{extra}]*")
-    if quoted and all(len(q) == 1 for q in quoted):
-        return "chars", re.compile(f"[{''.join(re.escape(q) for q in quoted)}]*")
-    if quoted:
-        return "tokens", set(quoted)
-    return None
+    named = "".join(c for word, c in NAMED_CHARS.items() if re.search(rf"\b{word}\b", what_l))
+    chars = "".join(set("".join(quoted) + named))
+    if not classes and not chars:
+        return None
+    pattern = re.compile(f"[{''.join(classes)}{re.escape(chars)}]*" if chars else f"[{''.join(classes)}]*")
+    tokens = set(quoted)
+
+    def ok(value: Any) -> bool:
+        if isinstance(value, str):
+            return pattern.fullmatch(value) is not None
+        return isinstance(value, list) and all(ok(x) or (isinstance(x, str) and x in tokens) for x in value)
+    return ok
 
 
 def _auto_rule(text: str, params: set[str], aliases: dict[str, str]) -> Check | None:
@@ -201,15 +375,8 @@ def _auto_rule(text: str, params: set[str], aliases: dict[str, str]) -> Check | 
     if m and not re.search(OPS, m.group(1)):
         allowed = _charset(m.group(2))
         if allowed and "exactly" not in m.group(2):
-            kind, spec = allowed
-            checks = []
-            for target in _targets(m.group(1)):
-                if kind == "chars":
-                    checks.append(_compile(f"__ok({_normalize(target, aliases)})", params,
-                                           {"__ok": lambda s, p=spec: isinstance(s, str) and p.fullmatch(s) is not None}))
-                else:
-                    checks.append(_compile(f"__all_in({_normalize(target, aliases)})", params,
-                                           {"__all_in": lambda xs, t=spec: all(x in t for x in xs)}))
+            checks = [_compile(f"__ok({_normalize(target, aliases)})", params, {"__ok": allowed})
+                      for target in _targets(m.group(1))]
             return lambda env: all(c(env) for c in checks)
     m = re.fullmatch(r"(.+?) is (?:either|one of) (.+)", body)
     if m:
@@ -531,76 +698,3 @@ def audit_problem(problem: dict[str, Any], content: str) -> dict[str, Any]:
         "unchecked": unparsed + list(broken_rules),
         "check_errors": broken_rules,
     }
-
-
-def fetch_content(slugs: dict[int, str], content_dir: Path) -> None:
-    """Cache each problem's LeetCode page HTML (for its exact Constraints)."""
-    import requests
-
-    content_dir.mkdir(parents=True, exist_ok=True)
-    for qid, slug in sorted(slugs.items()):
-        path = content_dir / f"{qid}.json"
-        if path.exists():
-            continue
-        for attempt in range(5):
-            try:
-                response = requests.post(
-                    GRAPHQL_URL,
-                    json={"query": "query q($titleSlug: String!) { question(titleSlug: $titleSlug) { content } }",
-                          "variables": {"titleSlug": slug}},
-                    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0",
-                             "Referer": f"https://leetcode.com/problems/{slug}/"},
-                    timeout=30,
-                )
-                response.raise_for_status()
-                content = response.json()["data"]["question"]["content"]
-                break
-            except Exception:
-                if attempt == 4:
-                    raise
-                time.sleep(2 * (attempt + 1))
-        path.write_text(json.dumps({"question_id": qid, "slug": slug, "content": content}))
-        time.sleep(1)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--split", choices=("test", "train"), default="test")
-    parser.add_argument("--dataset", type=Path, default=None,
-                        help="Flat per-(problem, language) JSONL; default: the hosted neulab/leetcode split.")
-    parser.add_argument("--content-dir", type=Path, default=DEFAULT_CONTENT_DIR)
-    parser.add_argument("--output", type=Path, default=None,
-                        help="Default: benchmarks/leetcode/data/invalid_tests_<split>.json")
-    parser.add_argument("--fetch", action="store_true", help="Fetch missing LeetCode pages first.")
-    args = parser.parse_args()
-
-    from .main import load_problems_hf_or_file
-
-    rows = load_problems_hf_or_file(args.dataset, args.split)
-    by_problem: dict[int, list[dict[str, Any]]] = {}
-    for row in rows:
-        by_problem.setdefault(int(row["question_id"]), []).append(row)
-    problems = [_problem_view(by_problem[qid]) for qid in sorted(by_problem)]
-    if args.fetch:
-        fetch_content({qid: by_problem[qid][0]["task_id"] for qid in by_problem}, args.content_dir)
-
-    report = []
-    for problem in problems:
-        page = args.content_dir / f"{problem['question_id']}.json"
-        if not page.exists():
-            raise SystemExit(f"Missing LeetCode page for {problem['question_id']}; rerun with --fetch")
-        report.append(audit_problem(problem, json.loads(page.read_text())["content"]))
-    output = args.output or invalid_tests_path(args.split)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(report, indent=2) + "\n")
-
-    affected = [r for r in report if r["invalid_tests"]]
-    print(f"{len(report)} problems audited; {len(affected)} have invalid tests; "
-          f"{sum(len(r['invalid_tests']) for r in report)} of {sum(r['tests'] for r in report)} test cases invalid")
-    unchecked = [(r["question_id"], u) for r in report for u in r["unchecked"]]
-    print(f"{sum(len(r['uncheckable']) for r in report)} rules documented as uncheckable; {len(unchecked)} unchecked")
-    print(f"wrote {output}")
-
-
-if __name__ == "__main__":
-    main()
