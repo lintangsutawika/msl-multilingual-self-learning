@@ -86,6 +86,26 @@ FLAG_PATTERNS = {
 }
 DECIMAL_TYPES = re.compile(r"\b(float|double)\b")
 
+# Hand-reviewed answer kinds where the wording patterns above get it wrong (read from the statement).
+REVIEWED_ANSWERS = {
+    # "any order" describes the input or the process; the answer's order matters.
+    950: ("ordered", "the deck order is the answer"),
+    2094: ("ordered", "'any arbitrary order' describes the digits; the answer must be sorted"),
+    2197: ("ordered", "'in any arbitrary order' describes the replacements; the final array's order matters"),
+    2273: ("ordered", "'in any arbitrary order' describes the operations; the final list's order matters"),
+    # Both the groups and the items inside each group may come in any order.
+    49: ("unordered_groups", "groups and the strings inside each group may come in any order"),
+    609: ("unordered_groups", "groups and the paths inside each group may come in any order"),
+    # Several different answers are correct.
+    1030: ("multiple_answers", "cells sorted by distance; ties may come in any order"),
+    1743: ("multiple_answers", "the array or its reverse; 'any order' describes the input pairs"),
+    2215: ("multiple_answers", "two lists in fixed order, each list's items in any order"),
+    1489: ("multiple_answers", "[critical, pseudo-critical], each list's indices in any order"),
+    1125: ("multiple_answers", "any sufficient team of the smallest size"),
+    2178: ("multiple_answers", "any split into the most unique even integers"),
+    2699: ("multiple_answers", "any valid assignment of the modified edge weights"),
+}
+
 
 # --- Problem-level checks -----------------------------------------------------
 
@@ -142,15 +162,25 @@ def _problem_drops(question: dict[str, Any] | None, meta: dict[str, Any]) -> lis
     return reasons
 
 
-def _flags(text: str, interfaces: dict[str, Any], meta: dict[str, Any], images: int) -> list[str]:
+def _flags(qid: int, text: str, interfaces: dict[str, Any], meta: dict[str, Any], images: int) -> list[str]:
     flags = [name for name, pattern in FLAG_PATTERNS.items() if pattern.search(text)]
     # "rearrange the substrings in any order" describes the task, not the answer, unless a list is returned.
-    if "any_order" in flags and not interfaces.get("python", {}).get("return_type", "").startswith("List"):
+    if "any_order" in flags and not interfaces.get("python", {}).get("return_type", "").lower().startswith("list"):
         flags.remove("any_order")
     returns = [meta.get("return", {}).get("type", "")]
     returns += [i["return_type"] for i in interfaces.values()]
     if any(DECIMAL_TYPES.search(t) for t in returns):
         flags.append("decimal_answer")
+    review = REVIEWED_ANSWERS.get(qid, (None, ""))[0]
+    if review == "ordered" and "any_order" in flags:
+        flags.remove("any_order")
+        flags.append("any_order_wording_not_about_answer")
+    elif review == "unordered_groups":
+        flags = [f for f in flags if f != "any_order"] + ["unordered_groups"]
+    elif review == "multiple_answers":
+        flags = [f for f in flags if f != "any_order"]
+        if "multiple_answers" not in flags:
+            flags.append("multiple_answers")
     if images:
         flags.append("has_images")
     if meta.get("manual"):
@@ -170,6 +200,14 @@ COMPARISON_HELPERS = {
         return sorted(result, key=repr) == sorted(expected, key=repr)
     return result == expected
 ''',
+    "unordered_groups": '''def answers_match(result, expected):
+    """The groups, and the items inside each group, may come in any order."""
+    def canonical(groups):
+        return sorted((sorted(g, key=repr) if isinstance(g, list) else g for g in groups), key=repr)
+    if isinstance(result, list) and isinstance(expected, list):
+        return canonical(result) == canonical(expected)
+    return result == expected
+''',
     "float": '''def answers_match(result, expected):
     """Decimal answers are accepted within 1e-5 (absolute or relative), as on LeetCode."""
     import math
@@ -186,6 +224,8 @@ COMPARISON_HELPERS = {
 def comparison_for(flags: list[str]) -> str:
     if "decimal_answer" in flags:
         return "float"
+    if "unordered_groups" in flags:
+        return "unordered_groups"
     if "any_order" in flags:
         return "unordered"
     return "exact"
@@ -217,6 +257,11 @@ def build_problem(row: dict[str, Any], cache_dir: Path) -> tuple[dict[str, Any] 
     question = crawled["question"] if crawled else None
     meta = _meta(question or {})
     entry: dict[str, Any] = {"question_id": qid, "task_id": row["task_id"], "drop": _problem_drops(question, meta)}
+    if question is not None:
+        try:
+            entry["similar"] = [q["titleSlug"] for q in json.loads(question.get("similarQuestions") or "[]")]
+        except ValueError:
+            entry["similar"] = []
     if entry["drop"] in (["not_crawled"], ["premium"]):
         return None, entry
 
@@ -226,7 +271,7 @@ def build_problem(row: dict[str, Any], cache_dir: Path) -> tuple[dict[str, Any] 
         entry["drop"].append("interface")
         entry["interface_problems"] = interface_problems
     names = [p.name for p in parse_hf_python_signature(row["starter_code"]).parameters]
-    entry["flags"] = _flags(description.text, interfaces, meta, len(description.images) + description.videos)
+    entry["flags"] = _flags(qid, description.text, interfaces, meta, len(description.images) + description.videos)
 
     # Tests: audit against the current Constraints, then drop the unfair ones.
     problem = {
@@ -251,8 +296,6 @@ def build_problem(row: dict[str, Any], cache_dir: Path) -> tuple[dict[str, Any] 
     entry["unchecked_constraints"] = audit["unchecked"]
     if kept < MIN_VALID_TESTS:
         entry["drop"].append("too_few_tests")
-    if "multiple_answers" in entry["flags"]:
-        entry["drop"].append("multiple_answers")  # needs a problem-specific checker
     entry["comparison"] = comparison_for(entry["flags"])
     if entry["drop"]:
         return None, entry
@@ -299,40 +342,86 @@ def build_split(split: str, cache_dir: Path, limit: int | None = None) -> tuple[
     return records, report
 
 
+CATEGORY_NOTES = {
+    "any_order": "list answer in any order -> 'unordered' comparison",
+    "unordered_groups": "groups and items in any order -> 'unordered_groups' comparison",
+    "any_order_wording_not_about_answer": "'any order' wording, answer order matters -> exact",
+    "multiple_answers": "several valid answers; exact comparison rejects some",
+    "decimal_answer": "float/double answer -> 'float' comparison (1e-5)",
+    "decimal_tolerance": "statement states a decimal tolerance",
+    "has_images": "page has images/videos (dropped from the text)",
+    "figure_reference": "text refers to a figure",
+    "leetcode_manual_judge": "LeetCode marks the judge as manual",
+    "unchecked_constraints": "has constraint rules the audit cannot check",
+    "similar_to_test": "LeetCode lists a test-split problem as similar",
+}
+
+
+def _ids(entries: list[dict], limit: int = 25) -> str:
+    ids = sorted(e["question_id"] for e in entries)
+    return " ".join(map(str, ids[:limit])) + (" ..." if len(ids) > limit else "")
+
+
 def summarize(split: str, report: list[dict]) -> str:
-    """The counts to quote: problems, tests and (problem, language) rows dropped, by reason."""
-    n = len(report)
+    """The counts to quote: problems, tests and (problem, language) rows dropped or flagged, by category."""
+    n_lang = len(LANGUAGES)
     kept = [e for e in report if not e["drop"]]
-    lines = [f"== {split}: {n} source problems -> {len(kept)} kept "
-             f"({len(kept) * len(LANGUAGES)} rows = problems x {len(LANGUAGES)} languages)"]
+    lines = [f"== {split}: {len(report)} source problems -> {len(kept)} kept "
+             f"({len(kept) * n_lang} rows = problems x {n_lang} languages)", "",
+             "  Problems dropped (first reason = counted once / any reason = overlapping):"]
     first = Counter(e["drop"][0] for e in report if e["drop"])
     anywhere = Counter(r for e in report for r in e["drop"])
-    lines.append("  problems dropped, by reason (first reason / any reason):")
     for reason in ("not_crawled", "premium", "class_design", "tree_or_linked_list", "in_place", "interface",
-                   "too_few_tests", "multiple_answers"):
+                   "too_few_tests"):
         if anywhere[reason]:
-            lines.append(f"    {reason:30} {first[reason]:5} / {anywhere[reason]}")
+            lines.append(f"    {reason:30} {first[reason]:5} / {anywhere[reason]:5}")
+    few = [e for e in report if e["drop"] == ["too_few_tests"]]
+    lines.append(f"    too_few_tests only: {len(few)} problems "
+                 f"({sum(1 for e in few if e['tests']['total'] < MIN_VALID_TESTS)} had < {MIN_VALID_TESTS} "
+                 f"tests to begin with, {sum(1 for e in few if e['tests']['total'] >= MIN_VALID_TESTS)} "
+                 f"fell below after test cleaning)")
+
     tested = [e for e in report if "tests" in e]
-    total = sum(e["tests"]["total"] for e in tested)
-    dropped = Counter()
-    for e in tested:
-        dropped.update(e["tests"]["dropped"])
-    lines.append(f"  tests (problems whose tests were checked: {len(tested)}): {total} total, "
-                 f"{sum(dropped.values())} dropped")
-    for reason, count in dropped.most_common():
-        lines.append(f"    {reason:30} {count:5}")
-    kept_tests = sum(e["tests"]["kept"] for e in kept)
-    kept_dropped = sum(sum(e["tests"]["dropped"].values()) for e in kept)
-    lines.append(f"  in kept problems: {kept_tests} tests kept, {kept_dropped} dropped")
-    comparisons = Counter(e["comparison"] for e in kept)
-    lines.append("  kept problems by answer comparison: " + ", ".join(f"{k} {v}" for k, v in comparisons.most_common()))
-    flags = Counter(f for e in kept for f in e.get("flags", []))
-    lines.append("  kept problems flagged for review:")
-    for flag, count in flags.most_common():
-        lines.append(f"    {flag:30} {count:5}")
-    unchecked = sum(len(e.get("unchecked_constraints", [])) for e in kept)
-    lines.append(f"  constraint rules not checked automatically (kept problems): {unchecked}")
+    lines += ["", f"  Tests (all {len(tested)} problems whose tests were checked / the {len(kept)} kept problems):"]
+    for group in ("total", "constraint_violation", "int_overflow", "non_finite"):
+        def count(entries, group=group):
+            if group == "total":
+                return sum(e["tests"]["total"] for e in entries)
+            return sum(e["tests"]["dropped"].get(group, 0) for e in entries)
+        affected = sum(1 for e in kept if e["tests"]["dropped"].get(group))
+        extra = f"   (in {affected} kept problems)" if group != "total" else ""
+        lines.append(f"    {group:30} {count(tested):7} / {count(kept):7}{extra}")
+
+    lines += ["", "  Categories among kept problems (not dropped; decide per category):",
+              f"    {'category':36} {'problems':>8} {'rows':>6}  ids"]
+    by_flag: dict[str, list[dict]] = {}
+    for e in kept:
+        flags = list(e.get("flags", []))
+        if e.get("unchecked_constraints"):
+            flags.append("unchecked_constraints")
+        if e.get("similar_to_test"):
+            flags.append("similar_to_test")
+        for f in flags:
+            by_flag.setdefault(f, []).append(e)
+    for flag in CATEGORY_NOTES:
+        entries = by_flag.get(flag, [])
+        if entries:
+            lines.append(f"    {flag:36} {len(entries):8} {len(entries) * n_lang:6}  {_ids(entries)}")
+    lines += ["", "  Category meanings:"] + [f"    {k}: {v}" for k, v in CATEGORY_NOTES.items()]
     return "\n".join(lines)
+
+
+def mark_overlap(train: list[dict], test: list[dict]) -> None:
+    """Flag train problems that LeetCode links to a test problem (either direction), or that share its id."""
+    test_slugs = {e["task_id"] for e in test}
+    test_ids = {e["question_id"] for e in test}
+    linked = {s for e in test for s in e.get("similar", [])}
+    for e in train:
+        hits = sorted((set(e.get("similar", [])) & test_slugs) | ({e["task_id"]} & linked))
+        if e["question_id"] in test_ids:
+            hits.append("same question_id")
+        if hits:
+            e["similar_to_test"] = hits
 
 
 # --- Output ---------------------------------------------------------------------
@@ -427,19 +516,24 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Write only the reports, not the data files.")
     args = parser.parse_args()
 
-    summaries = []
+    reports: dict[str, list[dict]] = {}
+    records: dict[str, list[dict]] = {}
     for split in (args.only,) if args.only else SPLITS:
-        records, report = build_split(split, args.cache_dir, args.limit)
-        reports = args.out / "reports"
-        reports.mkdir(parents=True, exist_ok=True)
-        (reports / f"{split}.json").write_text(json.dumps(report, indent=1) + "\n")
+        records[split], reports[split] = build_split(split, args.cache_dir, args.limit)
+    if "train" in reports and "test" in reports:
+        mark_overlap(reports["train"], reports["test"])
+    report_dir = args.out / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    summaries = []
+    for split, report in reports.items():
+        (report_dir / f"{split}.json").write_text(json.dumps(report, indent=1) + "\n")
         summaries.append(summarize(split, report))
         if not args.dry_run:
-            write_split(split, records, args.out, args.shard_mb)
+            write_split(split, records[split], args.out, args.shard_mb)
     if not args.dry_run:
         write_readme(args.out)
     summary = "\n\n".join(summaries)
-    (args.out / "reports" / "summary.txt").write_text(summary + "\n")
+    (report_dir / "summary.txt").write_text(summary + "\n")
     print(summary)
 
 
