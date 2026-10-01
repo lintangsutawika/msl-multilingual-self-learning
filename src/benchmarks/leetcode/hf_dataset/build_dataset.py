@@ -13,15 +13,18 @@ and LeetCode's typed metaData. Then it cleans:
   interface in one of the 9 languages;
 * tests are dropped when they break the problem's current Constraints, do not
   fit a declared type in some language, or expect inf/nan (constraints.py);
-* problems left with fewer than MIN_VALID_TESTS tests are dropped, and so are
-  problems with several valid answers (they need a problem-specific checker).
+* problems left with fewer than MIN_VALID_TESTS tests are dropped;
+* per split, DROP_CATEGORIES: the test split drops problems with several valid
+  answers or whose text refers to a figure; train drops problems LeetCode
+  links to a test problem.
 
 Answers that may come in any order, or are decimals, keep their tests but the
 asserts are rewritten to `answers_match(candidate(...), expected)` (defined in
 the same source: top-level order ignored, or 1e-5 tolerance), and
 canonical_tests.comparison records "unordered" / "float" / "exact".
 
-Every drop is recorded with its reason in reports/<split>.json, and problems
+Every drop is recorded with its reason in reports/<split>.json (listed in
+reports/dropped.md), and problems
 whose answers need more than an exact comparison (any order, several valid
 answers, decimals) are flagged there. The output is one row per (problem,
 language) in data/<split>/<lang>-NNN.jsonl (row-boundary shards so every file
@@ -372,7 +375,7 @@ def summarize(split: str, report: list[dict]) -> str:
     first = Counter(e["drop"][0] for e in report if e["drop"])
     anywhere = Counter(r for e in report for r in e["drop"])
     for reason in ("not_crawled", "premium", "class_design", "tree_or_linked_list", "in_place", "interface",
-                   "too_few_tests"):
+                   "too_few_tests", *dict.fromkeys(c for cs in DROP_CATEGORIES.values() for c in cs)):
         if anywhere[reason]:
             lines.append(f"    {reason:30} {first[reason]:5} / {anywhere[reason]:5}")
     few = [e for e in report if e["drop"] == ["too_few_tests"]]
@@ -422,6 +425,57 @@ def mark_overlap(train: list[dict], test: list[dict]) -> None:
             hits.append("same question_id")
         if hits:
             e["similar_to_test"] = hits
+
+
+# Categories dropped per split, decided on the dry-run report (2026-09-30). The test split
+# keeps only problems we can grade correctly in every language; train keeps what can still
+# give a learning signal but must not overlap the test split.
+DROP_CATEGORIES = {
+    "test": (
+        "multiple_answers",   # no general way to accept every valid answer
+        "figure_reference",   # the text points to a figure the model cannot see
+    ),
+    "train": (
+        "similar_to_test",    # LeetCode links it to a test problem: keep train and test apart
+    ),
+}
+
+
+def apply_drop_categories(split: str, records: list[dict], report: list[dict]) -> list[dict]:
+    """Drop the kept problems in this split's DROP_CATEGORIES; returns the remaining records."""
+    dropped = set()
+    for e in report:
+        if e["drop"]:
+            continue
+        categories = set(e.get("flags", [])) | ({"similar_to_test"} if e.get("similar_to_test") else set())
+        reasons = [c for c in DROP_CATEGORIES.get(split, ()) if c in categories]
+        if reasons:
+            e["drop"].extend(reasons)
+            dropped.add(e["question_id"])
+    return [r for r in records if r["question_id"] not in dropped]
+
+
+def drop_list(reports: dict[str, list[dict]]) -> str:
+    """Markdown list of every dropped problem, and of the tests dropped from kept problems."""
+    lines = ["# Dropped from neulab/leetcode", ""]
+    for split, report in reports.items():
+        dropped = [e for e in report if e["drop"]]
+        kept = [e for e in report if not e["drop"]]
+        lines += [f"## {split}: {len(dropped)} of {len(report)} problems dropped, {len(kept)} kept", "",
+                  "| question_id | task_id | reasons |", "|---|---|---|"]
+        lines += [f"| {e['question_id']} | {e['task_id']} | {', '.join(e['drop'])} |"
+                  for e in sorted(dropped, key=lambda e: e["question_id"])]
+        cleaned = [e for e in kept if e["tests"]["dropped"]]
+        total = sum(sum(e["tests"]["dropped"].values()) for e in cleaned)
+        lines += ["", f"### {split}: tests dropped from kept problems ({total} tests in {len(cleaned)} problems)", "",
+                  "| question_id | tests | kept | constraint_violation | int_overflow | non_finite |",
+                  "|---|---|---|---|---|---|"]
+        for e in sorted(cleaned, key=lambda e: e["question_id"]):
+            d = e["tests"]["dropped"]
+            lines.append(f"| {e['question_id']} | {e['tests']['total']} | {e['tests']['kept']} | "
+                         f"{d.get('constraint_violation', 0)} | {d.get('int_overflow', 0)} | {d.get('non_finite', 0)} |")
+        lines.append("")
+    return "\n".join(lines)
 
 
 # --- Output ---------------------------------------------------------------------
@@ -490,11 +544,13 @@ the `problem_description` (from the LeetCode page) and `metadata`.
 
 Tests that break the problem's Constraints, do not fit a declared type in some
 language, or expect inf/nan were removed; problems that take trees or linked
-lists, modify their input in place, have several valid answers, or kept fewer
-than 10 tests were dropped. Where answers may come in any order or are decimals,
+lists, modify their input in place, or kept fewer than 10 tests were dropped.
+The test split also drops problems with several valid answers or whose text
+refers to a figure; train drops problems LeetCode links to a test problem. Where answers may come in any order or are decimals,
 the asserts call `answers_match` (defined at the top of the test source), and
 `canonical_tests.comparison` says which rule applies ("unordered", "float" or "exact").
-`reports/<split>.json` lists every dropped problem and test with its reason.
+`reports/dropped.md` lists every dropped problem and test count, and
+`reports/<split>.json` has the details.
 
 ## Load
 
@@ -522,6 +578,8 @@ def main() -> None:
         records[split], reports[split] = build_split(split, args.cache_dir, args.limit)
     if "train" in reports and "test" in reports:
         mark_overlap(reports["train"], reports["test"])
+    for split in reports:
+        records[split] = apply_drop_categories(split, records[split], reports[split])
     report_dir = args.out / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     summaries = []
@@ -532,6 +590,7 @@ def main() -> None:
             write_split(split, records[split], args.out, args.shard_mb)
     if not args.dry_run:
         write_readme(args.out)
+    (report_dir / "dropped.md").write_text(drop_list(reports))
     summary = "\n\n".join(summaries)
     (report_dir / "summary.txt").write_text(summary + "\n")
     print(summary)
