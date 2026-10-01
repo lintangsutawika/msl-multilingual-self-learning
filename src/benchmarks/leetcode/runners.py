@@ -341,7 +341,7 @@ while (($line = fgets(STDIN)) !== false) {{
                 f"  result = solver.{call}(*args)"
             )
         else:
-            target = f"result = leetcode_target.call(*args)"
+            target = "result = leetcode_target.call(*args)"
 
         return f'''require "json"
 
