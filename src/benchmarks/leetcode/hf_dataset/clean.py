@@ -1,19 +1,9 @@
 """Decide what the build keeps: which problems, which tests, and how answers are compared.
 
-* Problems are dropped when they are premium (no statement), take or return a
-  TreeNode/ListNode (no transport for all 9 languages yet), modify their input
-  in place (newfacade's tests only check `== None`), or are class designs.
-* Tests are dropped when they break the problem's current Constraints, do not
-  fit a declared type in some language, or expect inf/nan (constraints.py);
-  problems left with fewer than MIN_VALID_TESTS tests are dropped.
-* Answers that may come in any order, or are decimals, keep their tests, but
-  the asserts are rewritten to `answers_match(candidate(...), expected)`,
-  defined in the same test source, so anyone running check(candidate)
-  compares correctly.
-* DROP_CATEGORIES drops further categories per split.
-
-Every decision is recorded in a report entry per problem; summarize() and
-drop_list() turn the entries into reports/summary.txt and reports/dropped.md.
+Drops premium, tree/linked-list, in-place and class-design problems, tests that
+are unfair for some language (constraints.py), and problems left with fewer than
+MIN_VALID_TESTS tests; rewrites the asserts of any-order and decimal answers to
+`answers_match`; and records every decision in a report entry per problem.
 """
 from __future__ import annotations
 

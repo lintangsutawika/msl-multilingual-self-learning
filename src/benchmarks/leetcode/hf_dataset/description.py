@@ -1,17 +1,7 @@
 """LeetCode page HTML -> the plain-text problem description the model sees.
 
-newfacade/LeetCodeDataset's descriptions were extracted without markup, so
-10<sup>9</sup> became "109", l<sub>i</sub> became "li" and list numbering was
-lost. This converter keeps that meaning in plain text:
-
-    10<sup>9</sup>      -> 10^9          2<sup>n-1</sup> -> 2^{n-1}
-    l<sub>i</sub>       -> l_i           x<sub>i+1</sub> -> x_{i+1}
-    <ol><li>            -> "1. "         <ul><li>        -> "- "
-    <table>             -> "a | b" rows  <br>            -> newline
-
-Images and videos are dropped (the prompt is text only) and counted, so a
-problem whose text depends on a figure can be reviewed. <style> blocks and
-browser-extension residue pasted into some pages are removed.
+Keeps what newfacade's text lost: 10<sup>9</sup> -> 10^9, l<sub>i</sub> -> l_i,
+list numbering and tables. Images and videos are dropped (and counted).
 """
 from __future__ import annotations
 

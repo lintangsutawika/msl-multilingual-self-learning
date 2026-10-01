@@ -1,22 +1,9 @@
 """Decide which canonical tests are fair for every language.
 
-LeetCodeDataset generated its test inputs and recorded the Python reference
-solution's output, without checking them against the problem. A test is
-dropped (for every language) when:
-
-* its input breaks the problem's Constraints. Each <li> under "Constraints"
-  on the LeetCode page becomes a check: common forms (ranges, lengths,
-  character sets, uniqueness, ...) are parsed automatically; "The input is
-  generated such that ..." guarantees have hand-written checks in
-  MANUAL_CHECKS; rules that cannot be checked without solving the problem are
-  listed in UNCHECKABLE. Rules matching none of these are reported as
-  unchecked so they can be added;
-* a value does not fit a declared LeetCode type in some language (a 7e9 where
-  Rust/C++/Java take an `int`), or the expected output is inf/nan, which
-  cannot cross the JSON transport.
-
-build_dataset.py applies these checks, so the published dataset holds only
-fair tests.
+A test is dropped when its input breaks the problem's Constraints (each rule on
+the LeetCode page becomes a check; MANUAL_CHECKS covers "The input is generated
+such that ..." rules, UNCHECKABLE lists rules that need the solution), when a
+value does not fit a declared type in some language, or when it expects inf/nan.
 """
 from __future__ import annotations
 
@@ -138,20 +125,10 @@ def filter_canonical_tests(
     problem: dict[str, Any],
     invalid: dict[str, list[str]] | None = None,
 ) -> tuple[str, list[dict[str, Any]], int]:
-    """Drop test cases that are not fair for every language.
+    """Drop tests that do not fit a declared type in some language, expect inf/nan,
+    or are listed in `invalid` (assert source -> violated rules).
 
-    LeetCodeDataset generated its test inputs and recorded the Python
-    reference's output, so some cases break the problem's own contract:
-
-    * values that do not fit a declared LeetCode type (board values of 7e9
-      where LeetCode promises |x| <= 1e9 cannot even be received in
-      Rust/C++/Java's `int`), and expected outputs of inf/-inf (the reference's
-      sentinel), which no language can return;
-    * inputs that violate the problem's Constraints, listed in `invalid`
-      (assert source -> violated rules, from constraints.py's audit).
-
-    Such cases are removed for every language. Returns (source, dropped,
-    number of test cases kept).
+    Returns (source, dropped, number of test cases kept).
     """
     invalid = invalid or {}
     source = problem["canonical_tests"]["source"]
@@ -324,11 +301,9 @@ VAGUE_CHARSET = re.compile(r"\bsymbols?\b|printable|ascii|any characters?|specia
 
 
 def _charset(what: str) -> Callable[[Any], bool] | None:
-    """A check for "consists of ..." descriptions like "lowercase English letters, digits and '_'".
+    """A check for "consists of ..." rules like "lowercase English letters, digits and '_'".
 
-    Strings must consist of the allowed characters; lists (and grids) of
-    strings may also hold whole quoted tokens. None when the description is
-    not understood.
+    None when the description is not understood.
     """
     if VAGUE_CHARSET.search(what):
         return None

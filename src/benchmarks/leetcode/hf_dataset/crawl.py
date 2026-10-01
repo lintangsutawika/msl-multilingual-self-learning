@@ -1,9 +1,7 @@
 """Fetch and cache the LeetCode problem pages that neulab/leetcode is built from.
 
-One GraphQL request per problem fetches everything the build needs (page HTML,
-code snippets, metaData, similar questions, ...). Each response is cached as
-<cache-dir>/<question_id>.json, so a build resumes where it stopped and a
-rebuild needs no network.
+One GraphQL request per problem; each response is cached as
+<cache-dir>/<question_id>.json, so a build resumes and a rebuild is offline.
 """
 from __future__ import annotations
 
@@ -74,10 +72,7 @@ def fetch(slug: str) -> dict[str, Any] | None:
 
 def load_or_fetch(question_id: int, slug: str, cache_dir: Path = DEFAULT_CACHE_DIR,
                   rate_delay: float = 3.0) -> dict[str, Any] | None:
-    """The cached record for a problem, fetching (then pausing rate_delay) if it is not cached.
-
-    None if LeetCode returned nothing for the slug.
-    """
+    """The cached record for a problem, fetched first if needed; None if LeetCode has none."""
     path = cache_dir / f"{question_id}.json"
     if path.is_file():
         return json.loads(path.read_text(encoding="utf-8"))
