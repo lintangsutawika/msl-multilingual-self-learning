@@ -177,31 +177,37 @@ leaves in `/workspace` (tsconfig.json, Cargo.toml, package.json) are ignored.
 The algorithm itself is never repaired: compile errors in the solution's own
 code, wrong answers and crashes count as failures.
 
-### Invalid test cases
+### How the dataset is built and cleaned
 
-LeetCodeDataset generated its test inputs and recorded the Python reference
-solution's output without checking them against the problem's constraints,
-so some cases break the problem's own contract and have no well-defined
-answer. Generation removes them for every language:
-
-* inputs that violate LeetCode's Constraints section (e.g. `s.length == 30`
-  where the problem requires `s.length == t.length`, or queries `[5, 5]` where
-  it requires `l < r`). `src/benchmarks/leetcode/constraints.py` turns each
-  problem's Constraints into checks and records the violating cases in
-  `benchmarks/leetcode/data/invalid_tests_<split>.json`;
-* values that do not fit a language's declared LeetCode types (board values
-  of 7e9 cannot even be received in Rust/C++/Java's `int`), and expected
-  outputs of `inf`/`-inf`, which no language can return.
-
-Which tests are dropped is decided per problem from all nine languages'
-interfaces, so it does not depend on `--lang`. Problems left with fewer than
-10 valid test cases are excluded. On the test set, 1857 of 20272 test cases
-are dropped across 146 problems. To rerun an audit (it fetches each problem's
-LeetCode page for its exact Constraints):
+`neulab/leetcode` is built once by `src/benchmarks/leetcode/hf_dataset/` and
+pushed to Hugging Face; task generation uses its rows as they are.
 
 ```bash
-uv run python -m src.benchmarks.leetcode.constraints --split test --fetch
+# 1. Crawl each problem's LeetCode page (resumable, cached in ~/.cache/msl-leetcode/raw).
+uv run python -m src.benchmarks.leetcode.hf_dataset.crawl
+# 2. Build into a local clone of the HF dataset repo (--dry-run writes only reports/).
+uv run python -m src.benchmarks.leetcode.hf_dataset.build_dataset --out ../neulab-leetcode
 ```
+
+* **Description**: taken from the LeetCode page with exponents (`10^9`, not
+  `109`), subscripts (`l_i`), numbered lists and tables kept; images are dropped.
+* **Interfaces**: each language's signature from LeetCode's code snippets.
+* **Tests**: LeetCodeDataset's `check(candidate)` asserts (inputs plus the
+  Python reference's output), minus the ones that are unfair for some language:
+  inputs that break the problem's Constraints (`hf_dataset/constraints.py`
+  turns each rule into a check), values that do not fit a declared type
+  (7e9 in Rust/C++/Java's `int`), and expected `inf`/`nan`.
+* **Comparison**: where a list answer may come in any order, or the answer is
+  a decimal, the asserts call `answers_match` (defined at the top of the test
+  source: top-level order ignored, or 1e-5 tolerance), and
+  `canonical_tests.comparison` says which.
+* **Dropped problems**: premium, tree/linked-list inputs, in-place answers
+  (LeetCodeDataset only checks `== None`), fewer than 10 valid tests, and in
+  the test split also several valid answers or text that refers to a figure.
+
+`reports/dropped.md` in the dataset lists every dropped problem and test.
+Test split: 191 of 228 problems kept, with 18,070 tests (1,846 dropped).
+Train: 2,061 of 2,641 problems kept, with 189,802 tests.
 
 ## Knobs (env vars)
 

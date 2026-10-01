@@ -19,7 +19,7 @@ import os
 import shutil
 from pathlib import Path
 
-from .adapter import LANGUAGES, generate_all, invalid_tests_path, load_invalid_tests
+from .adapter import LANGUAGES, generate_all
 
 
 DEFAULT_OUTPUT = Path("benchmarks/leetcode/tasks")
@@ -36,11 +36,14 @@ def load_problems(dataset: Path) -> list[dict]:
 
 
 def load_problems_hf_or_file(dataset: Path | None, split: str) -> list[dict]:
-    """Return problem rows: an explicit --dataset JSONL if given, else the
-    hosted neulab/leetcode dataset (pulled)."""
+    """Return problem rows: an explicit --dataset JSONL file, or a local
+    build_dataset.py output directory, if given; else the hosted
+    neulab/leetcode dataset (pulled)."""
+    from .dataset import load_problems_hf
+    if dataset is not None and dataset.is_dir():
+        return load_problems_hf(split, dataset=str(dataset))
     if dataset is not None:
         return load_problems(dataset)
-    from .dataset import load_problems_hf
     return load_problems_hf(split)
 
 
@@ -91,9 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Path to a pre-built execution JSONL. If omitted, problems are built "
-            "live from newfacade/LeetCodeDataset for the split (test for set "
-            "a1/a2/b, train for set train)."
+            "A flat per-(problem, language) JSONL, or a local build_dataset.py "
+            "output directory. If omitted, the split is pulled from the hosted "
+            "neulab/leetcode dataset (test for set a1/a2/b, train for set train)."
         ),
     )
 
@@ -136,16 +139,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Record unsupported transports in exclusions.json "
             "instead of aborting."
-        ),
-    )
-
-    parser.add_argument(
-        "--invalid-tests",
-        type=Path,
-        default=None,
-        help=(
-            "Constraint audit listing invalid test cases to drop for every language "
-            "(default: benchmarks/leetcode/data/invalid_tests_<split>.json; see constraints.py)."
         ),
     )
 
@@ -299,19 +292,11 @@ def main() -> None:
         except Exception:
             raise
 
-    invalid_path = args.invalid_tests or invalid_tests_path(_split)
-    if not invalid_path.is_file():
-        raise SystemExit(
-            f"Constraint audit not found: {invalid_path}. Run: "
-            f"uv run python -m src.benchmarks.leetcode.constraints --split {_split} --fetch"
-        )
-
     exclusions, count = generate_all(
         problems,
         output=output_dir,
         images=images,
         skip_unsupported=args.skip_unsupported,
-        invalid_tests=load_invalid_tests(invalid_path),
         languages=languages,
     )
 

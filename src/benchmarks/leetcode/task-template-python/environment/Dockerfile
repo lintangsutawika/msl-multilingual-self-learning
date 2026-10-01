@@ -14,4 +14,7 @@ RUN apt-get update && \
     /opt/harbor-server/bin/python3 -m pip install --no-cache-dir uvicorn fastapi && \
     rm -rf /var/lib/apt/lists/*
 
+# LeetCode's Python 3 judge provides sortedcontainers (SortedList, SortedDict).
+RUN python3 -m pip install --no-cache-dir sortedcontainers
+
 RUN python3 --version

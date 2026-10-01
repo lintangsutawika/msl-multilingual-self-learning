@@ -15,7 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from .hf_dataset.constraints import MIN_VALID_TESTS, canonical_names, filter_canonical_tests
+from .hf_dataset.constraints import canonical_names
 from .runners import render_worker
 
 LANGUAGES = (
@@ -29,7 +29,6 @@ LANGUAGES = (
     "php",
     "ruby",
 )
-OMITTED_QUESTIONS = {3319: "Omitted pending tree transport support"}
 SOURCE_FILES = {
     "python": "solution.py",
     "cpp": "solution.cpp",
@@ -54,24 +53,6 @@ ADAPTERS = {
 }
 
 PKG = Path(__file__).parent
-
-
-# Constraint audits of the canonical tests, one per split (see constraints.py).
-INVALID_TESTS_DIR = Path("benchmarks/leetcode/data")
-
-
-def invalid_tests_path(split: str) -> Path:
-    return INVALID_TESTS_DIR / f"invalid_tests_{split}.json"
-
-
-def load_invalid_tests(path: Path) -> dict[int, dict[str, list[str]]]:
-    """question_id -> {assert source: violated rules} from constraints.py's audit."""
-    if not path.is_file():
-        return {}
-    return {
-        int(entry["question_id"]): {t["test"]: t["violates"] for t in entry["invalid_tests"]}
-        for entry in json.loads(path.read_text())
-    }
 
 
 def _fill(path: Path, **kw: str) -> None:
@@ -269,7 +250,7 @@ def generate(
 
     # Copy the per-language template into the new task.
     tpl = PKG / f"task-template-{language}"
-    shutil.copytree(tpl, task, dirs_exist_ok=False)
+    shutil.copytree(tpl, task, dirs_exist_ok=False, ignore=shutil.ignore_patterns("__pycache__"))
 
     # When a prebuilt sif supplies docker_image (e.g. --prebuild-sif), the image
     # already carries the full toolchain, so the task's environment/Dockerfile
@@ -325,81 +306,40 @@ def generate(
     return task
 
 
-def _problem_view(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """One problem across all its language rows: what the test filter needs."""
-    first = rows[0]
-    return {
-        "question_id": first["question_id"],
-        "metadata": first.get("metadata") or {},
-        "canonical_tests": first["canonical_tests"],
-        "interfaces": {row["language"]: row["interface"] for row in rows},
-    }
-
-
 def generate_all(
     rows: list[dict[str, Any]],
     output: Path,
     images: dict[str, str] | None = None,
     skip_unsupported: bool = False,
-    invalid_tests: dict[int, dict[str, list[str]]] | None = None,
     languages: tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Generate one task per flat (problem, language) row, staging atomically.
 
-    Test cases are filtered per problem using all of its language rows, so the
-    kept tests do not depend on which languages are generated (`languages`
-    restricts the rows turned into tasks). Returns (exclusions, count). Aborts
-    (raising) on unsupported transports unless skip_unsupported, in which case
-    they are recorded as exclusions.
+    The rows come from neulab/leetcode, whose tests were already cleaned when
+    the dataset was built (hf_dataset/build_dataset.py), so they are used as
+    they are. `languages` restricts the rows turned into tasks. Returns
+    (exclusions, count). Aborts (raising) on unsupported transports unless
+    skip_unsupported, in which case they are recorded as exclusions.
     """
     images = images or {}
     output.parent.mkdir(parents=True, exist_ok=True)
-    by_problem: dict[int, list[dict[str, Any]]] = {}
-    for row in rows:
-        by_problem.setdefault(int(row["question_id"]), []).append(row)
     exclusions: list[dict[str, Any]] = []
-    dropped_tests: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(dir=output.parent) as directory:
         staged = Path(directory) / "tasks"
         staged.mkdir()
-        for qid in sorted(by_problem):
-            problem_rows = by_problem[qid]
-            wanted = [r for r in problem_rows if languages is None or r["language"] in languages]
-            if not wanted:
-                continue
-            if qid in OMITTED_QUESTIONS:
-                exclusions.extend({"question_id": qid, "language": r["language"], "reason": OMITTED_QUESTIONS[qid]}
-                                  for r in wanted)
+        for row in rows:
+            lang = row["language"]
+            if languages is not None and lang not in languages:
                 continue
             try:
-                source, dropped, kept = filter_canonical_tests(
-                    _problem_view(problem_rows), (invalid_tests or {}).get(qid))
-            except (KeyError, ValueError) as exc:
+                generate(row, staged, images.get(lang))
+            # NotImplementedError: unsupported transport; ValueError: the dataset's
+            # canonical tests and native interface disagree (e.g. parameter counts).
+            except (NotImplementedError, ValueError) as exc:
                 if not skip_unsupported:
                     raise
-                exclusions.extend({"question_id": qid, "language": r["language"], "reason": f"Unreadable tests: {exc}"}
-                                  for r in wanted)
-                continue
-            if dropped:
-                dropped_tests.append({"question_id": qid, "kept": kept, "dropped": dropped})
-            if kept < MIN_VALID_TESTS:
-                exclusions.extend({"question_id": qid, "language": r["language"],
-                                   "reason": f"Only {kept} valid test cases (< {MIN_VALID_TESTS})"} for r in wanted)
-                continue
-            for row in wanted:
-                if dropped:
-                    row = {**row, "canonical_tests": {**row["canonical_tests"], "source": source}}
-                try:
-                    generate(row, staged, images.get(row["language"]))
-                # NotImplementedError: unsupported transport; ValueError: the dataset's
-                # canonical tests and native interface disagree (e.g. parameter counts).
-                except (NotImplementedError, ValueError) as exc:
-                    if not skip_unsupported:
-                        raise
-                    exclusions.append({"question_id": qid, "language": row["language"], "reason": str(exc)})
+                exclusions.append({"question_id": row["question_id"], "language": lang, "reason": str(exc)})
         if exclusions:
             (staged / "exclusions.json").write_text(json.dumps(exclusions, indent=2) + "\n")
-        if dropped_tests:
-            (staged / "dropped_tests.json").write_text(json.dumps(dropped_tests, indent=2) + "\n")
         staged.rename(output)
     return exclusions, sum(1 for p in output.iterdir() if p.is_dir())

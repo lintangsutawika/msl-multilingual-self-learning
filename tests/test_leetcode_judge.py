@@ -136,7 +136,7 @@ class OverflowFilterTests(unittest.TestCase):
         }
 
     def test_out_of_range_input_is_dropped(self):
-        from src.benchmarks.leetcode.adapter import filter_canonical_tests
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
         source = (
             "def check(candidate):\n"
             "    assert candidate(x = [1, 2]) == 3\n"
@@ -149,19 +149,19 @@ class OverflowFilterTests(unittest.TestCase):
         self.assertEqual(kept, 2)
 
     def test_large_result_fits_a_64_bit_return_type(self):
-        from src.benchmarks.leetcode.adapter import filter_canonical_tests
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
         source = "def check(candidate):\n    assert candidate(x = [2000000000, 2000000000]) == 4000000000\n"
         self.assertEqual(filter_canonical_tests(self.problem(source)), (source, [], 1))
 
     def test_infinite_expected_output_is_dropped_for_every_language(self):
-        from src.benchmarks.leetcode.adapter import filter_canonical_tests
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
         source = "def check(candidate):\n    assert candidate(x = [1]) == 1\n    assert candidate(x = [2]) == -inf\n"
         filtered, dropped, _ = filter_canonical_tests(self.problem(source))
         self.assertEqual(filtered, "def check(candidate):\n    assert candidate(x = [1]) == 1\n")
         self.assertEqual(dropped[0]["unrepresentable_in"], ["python", "go", "rust", "java"])
 
     def test_audited_invalid_tests_are_dropped(self):
-        from src.benchmarks.leetcode.adapter import filter_canonical_tests
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
         source = "def check(candidate):\n    assert candidate(x = [1]) == 1\n    assert candidate(x = [0]) == 0\n"
         invalid = {"assert candidate(x=[0]) == 0": ["1 <= x[i] <= 10"]}
         filtered, dropped, kept = filter_canonical_tests(self.problem(source), invalid)
@@ -170,17 +170,16 @@ class OverflowFilterTests(unittest.TestCase):
         self.assertEqual(kept, 1)
 
     def test_every_test_dropped_leaves_none(self):
-        from src.benchmarks.leetcode.adapter import filter_canonical_tests
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
         self.assertEqual(filter_canonical_tests(self.problem("def check(candidate):\n    assert candidate(x = [2**40]) == 1\n"))[2], 0)
 
 
 class GenerateAllTests(unittest.TestCase):
-    """The kept tests of a problem do not depend on which languages are generated."""
+    """Tasks use the dataset's (already cleaned) tests as they are."""
 
     def rows(self):
         source = ("def check(candidate):\n"
-                  + "".join(f"    assert candidate(x = [{i}]) == {i}\n" for i in range(11))
-                  + "    assert candidate(x = [3000000000]) == 0\n")
+                  + "".join(f"    assert candidate(x = [{i}]) == {i}\n" for i in range(11)))
         base = {"question_id": 7, "task_id": "fixture", "difficulty": "Easy", "problem_description": "Fixture",
                 "metadata": {"canonical_parameter_names": ["x"]}, "canonical_tests": {"source": source}}
         interface = lambda t, sig: {"parameters": [{"name": "x", "type": t}], "return_type": "int",
@@ -190,16 +189,13 @@ class GenerateAllTests(unittest.TestCase):
             {**base, "language": "java", "interface": interface("int[]", "public int f(int[] x) {")},
         ]
 
-    def kept_source(self, languages):
+    def test_tests_are_used_as_they_are_and_languages_filter_rows(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory) / "tasks"
-            generate_all(self.rows(), out, languages=languages)
-            return (out / "7-python/tests/canonical_test.py").read_text()
-
-    def test_python_only_generation_drops_what_java_cannot_hold(self):
-        python_only = self.kept_source(("python",))
-        self.assertNotIn("3000000000", python_only)
-        self.assertEqual(python_only, self.kept_source(("python", "java")))
+            _, count = generate_all(self.rows(), out, languages=("python",))
+            self.assertEqual(count, 1)
+            self.assertEqual((out / "7-python/tests/canonical_test.py").read_text(),
+                             self.rows()[0]["canonical_tests"]["source"])
 
 
 if __name__ == "__main__":
