@@ -80,6 +80,19 @@ class ConstraintTests(unittest.TestCase):
         page = '<p><strong>Constraints:</strong></p><ul><li data-stringify-border="0"><code>2 &lt;= n &lt;= 100</code></li></ul>'
         self.assertEqual(constraint_items(page), ["2 <= n <= 100"])
 
+    def test_plain_text_caret_is_a_power(self):
+        page = "<p><strong>Constraints:</strong></p><ul><li>1 &lt;= label &lt;= 10^6</li></ul>"
+        self.assertEqual(constraint_items(page), ["1 <= label <= 10**6"])
+
+    def test_rule_that_rejects_a_public_example_is_not_used(self):
+        page = "<p><strong>Constraints:</strong></p><ul><li>1 &lt;= n &lt;= 3</li><li>n is even.</li></ul>"
+        tests = "def check(candidate):\n    assert candidate(n = 1) == 1\n    assert candidate(n = 5) == 5\n"
+        problem = {"question_id": 1, "metadata": {"canonical_parameter_names": ["n"]},
+                   "canonical_tests": {"source": tests}}
+        report = audit_problem(problem, page, examples=[{"n": 1}])
+        self.assertEqual(report["check_errors"], {"n is even.": "rejects a public example"})
+        self.assertEqual([t["violates"] for t in report["invalid_tests"]], [["1 <= n <= 3"]])
+
     def test_vague_character_sets_are_not_checked(self):
         self.assertIsNone(_auto_rule("s consists of English letters, digits, symbols and spaces.", {"s"}, {}))
 

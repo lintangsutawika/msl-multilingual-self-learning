@@ -113,9 +113,23 @@ def flags(question_id: int, text: str, interfaces: dict[str, Any], question: dic
 
 # --- Tests ----------------------------------------------------------------------
 
-def clean_tests(problem: dict[str, Any], content: str) -> tuple[str, dict[str, Any]]:
+def public_examples(question: dict[str, Any], names: list[str]) -> list[dict[str, Any]]:
+    """The page's example inputs as {parameter name: value}, one per example."""
+    examples = []
+    for case in question.get("exampleTestcaseList") or []:
+        try:
+            values = [json.loads(line) for line in case.split("\n")]
+        except ValueError:
+            continue
+        if len(values) == len(names):
+            examples.append(dict(zip(names, values)))
+    return examples
+
+
+def clean_tests(problem: dict[str, Any], content: str,
+                examples: list[dict[str, Any]] = ()) -> tuple[str, dict[str, Any]]:
     """(test source without unfair tests, report fields) for a problem's newfacade tests."""
-    audit = audit_problem(problem, content)
+    audit = audit_problem(problem, content, examples)
     invalid = {t["test"]: t["violates"] for t in audit["invalid_tests"]}
     source, dropped, kept = filter_canonical_tests(problem, invalid)
     reasons = Counter()

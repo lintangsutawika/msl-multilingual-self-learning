@@ -176,6 +176,8 @@ def _plain(fragment: str) -> str:
     fragment = re.sub(r"<sup>\s*(.*?)\s*</sup>", r"**(\1)", fragment, flags=re.S)
     fragment = re.sub(r"<[^>]+>", "", fragment)
     fragment = html.unescape(fragment).replace(" ", " ").replace("−", "-")
+    # Some pages write 10^9 as plain text; in a rule it is a power, not XOR.
+    fragment = re.sub(r"(?<=[\w)])\s*\^\s*(?=[\w(-])", "**", fragment)
     return " ".join(fragment.split())
 
 
@@ -648,13 +650,26 @@ def test_cases(problem: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     return cases
 
 
-def audit_problem(problem: dict[str, Any], content: str) -> dict[str, Any]:
+def _passes(check: Check, env: dict[str, Any]) -> bool:
+    try:
+        return bool(check(env))
+    except Exception:
+        return False
+
+
+def audit_problem(problem: dict[str, Any], content: str,
+                  examples: list[dict[str, Any]] = ()) -> dict[str, Any]:
+    """Tests that break a Constraints rule. `examples` are the page's public examples
+    (arguments by name): a rule that rejects one is misread, so it is not used."""
     qid = int(problem["question_id"])
     checks, uncheckable, unparsed = build_checks(qid, content, set(canonical_names(problem)))
     cases = test_cases(problem)
     broken_rules: dict[str, str] = {}
     invalid: dict[str, list[str]] = {}
     for text, check in checks:
+        if any(not _passes(check, env) for env in examples):
+            broken_rules[text] = "rejects a public example"
+            continue
         failing = []
         for test, env in cases:
             try:

@@ -28,6 +28,7 @@ from .clean import (
     flags,
     mark_overlap,
     problem_drops,
+    public_examples,
     summarize,
 )
 from .crawl import DEFAULT_CACHE_DIR, load_or_fetch
@@ -178,6 +179,7 @@ def build_problem(
             "interfaces": interfaces,
         },
         question["content"],
+        public_examples(question, entry["parameter_names"]),
     )
     entry["drop"] += test_report.pop("drop")
     entry.update(test_report)
