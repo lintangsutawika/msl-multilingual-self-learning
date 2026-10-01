@@ -108,15 +108,29 @@ class SimpleCodeAgent(BaseAgent):
                 len("openai/"):
             ]
 
+        # Per-request timeout in seconds (REQUEST_TIMEOUT); unset keeps the client's 600 s.
+        request_timeout = self._get_env("REQUEST_TIMEOUT")
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
+            **({"timeout": float(request_timeout)} if request_timeout else {}),
         )
 
         max_tokens = int(
             self._get_env("MAX_TOKENS")
             or "8192"
         )
+
+        # Sampling: greedy with thinking off unless set. THINKING=1 TEMPERATURE=0.6
+        # TOP_P=0.95 TOP_K=20 matches the mini-swe-agent Qwen3.5 configs.
+        thinking = (self._get_env("THINKING") or "0").lower() in ("1", "true", "yes")
+        temperature = float(self._get_env("TEMPERATURE") or "0")
+        sampling = {}
+        if self._get_env("TOP_P"):
+            sampling["top_p"] = float(self._get_env("TOP_P"))
+        extra_body = {"chat_template_kwargs": {"enable_thinking": thinking}}
+        if self._get_env("TOP_K"):
+            extra_body["top_k"] = int(self._get_env("TOP_K"))
 
         response = await client.chat.completions.create(
             model=model_name,
@@ -135,13 +149,10 @@ class SimpleCodeAgent(BaseAgent):
                     "content": instruction,
                 },
             ],
-            temperature=0,
+            temperature=temperature,
             max_tokens=max_tokens,
-            extra_body={
-                "chat_template_kwargs": {
-                    "enable_thinking": False,
-                }
-            },
+            extra_body=extra_body,
+            **sampling,
         )
         await client.close()
         if response.choices[0].finish_reason == "length":
