@@ -1,25 +1,13 @@
-"""Build the neulab/leetcode Hugging Face dataset.
+"""Build the neulab/leetcode Hugging Face dataset from LeetCode + GraphQL.
 
-Build once, push to HF. For every problem in newfacade/LeetCodeDataset it
-takes the canonical tests (inputs + the Python reference's outputs) and
-combines them with the problem's LeetCode page (fetched and cached by crawl.py).
-clean.py decides what is kept:
-
-* problems are dropped when they are premium, take or return a
-  TreeNode/ListNode, or lack a parseable interface in one of the 9 languages;
-* tests are dropped when they break the problem's current Constraints, do not
-  fit a declared type in some language, or expect inf/nan;
-* problems left with fewer than MIN_VALID_TESTS (10) tests are dropped;
-* per split, DROP_CATEGORIES: the test split drops problems with several valid
-  answers or whose text refers to a figure.
-
-    uv run python -m src.benchmarks.leetcode.hf_dataset.build_dataset --out ../leetcode-hf
-
-writes data/<split>/<lang>-NNN.jsonl (row-boundary shards so every file stays
-under HF's ~10 MiB per-file ceiling; HF globs them into one split), README.md,
-and reports/ (summary.txt, dropped.md: every dropped problem and test with its
-reason). After `git push` of --out, `datasets.load_dataset("neulab/leetcode",
-split=...)` returns the rows, which dataset.py pulls at generation time.
+This is the PREP step (build once, push to HF). It takes the canonical tests from
+newfacade/LeetCodeDataset, fetches each problem's LeetCode page (crawl.py), builds
+the 9-language `interfaces`, the description and the cleaned tests (clean.py),
+flattens to one row per (problem, language), and writes `data/<split>/<lang>-NNN.jsonl`
+(row-boundary shards under HF's ~10 MiB per-file ceiling) plus `reports/` listing
+every dropped problem and test. After `git push`,
+`datasets.load_dataset("neulab/leetcode", split=...)` returns the rows, which
+dataset.py pulls at generation time.
 """
 from __future__ import annotations
 
@@ -60,7 +48,7 @@ LANGUAGES = (
 )
 
 DATASET_NAME = "newfacade/LeetCodeDataset"
-# Our hosted, post-interface dataset on HF (pushed from benchmarks/leetcode/hf_dataset).
+# Our hosted dataset on HF.
 NEULAB_HF_DATASET = "neulab/leetcode"
 
 
@@ -88,7 +76,7 @@ def _resolve_all_interfaces(
     problem: LeetCodeProblem,
     question: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
-    """({language: interface}, [why a language has none]) from the page's codeSnippets."""
+    """Interfaces for the 9 languages, and why any is missing."""
     snippets = {s["langSlug"]: s["code"] for s in question.get("codeSnippets") or []}
     interfaces: dict[str, Any] = {}
     problems: list[str] = []
@@ -103,8 +91,7 @@ def _resolve_all_interfaces(
         try:
             interface = parse_leetcode_interface(problem.question_id, language, code)
         except Exception as exc:
-            # One malformed language signature (an unusual C++/PHP param form the
-            # parser doesn't handle) skips the whole problem; it is reported.
+            # One malformed signature skips the whole problem (reported).
             problems.append(f"{language}: {type(exc).__name__}: {exc}"[:200])
             continue
 
@@ -158,7 +145,7 @@ def build_problem(
     cache_dir: Path,
     rate_delay: float,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """(record, or None if the problem is dropped; its report entry)."""
+    """(record or None if dropped, report entry) for one problem."""
     crawled = load_or_fetch(problem.question_id, problem.task_id, cache_dir, rate_delay)
     question = crawled["question"] if crawled else None
     entry: dict[str, Any] = {
@@ -209,12 +196,7 @@ def build_problems_hf(
     rate_delay: float = 3.0,
     limit: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
-    """(records, report entries) for a split of newfacade/LeetCodeDataset.
-
-    Pages are fetched on first use (throttled by --rate-delay, with backoff) and
-    cached, so a re-run resumes where it stopped and later builds are offline.
-    `limit` caps how many problems are processed (for smoke-testing a subset).
-    """
+    """Build (records, report entries) for a split; pages are fetched once and cached."""
     if split == "train":
         problems = load_train_split()
     else:
@@ -262,7 +244,7 @@ def _clean_json_line(r) -> str:
 
 
 def build(split, records, out, *, shard_mb=8):
-    """Write a split's records as data/<split>/<lang>-NNN.jsonl, replacing older files."""
+    """Write data/<split>/<lang>-NNN.jsonl, replacing older files."""
     flat = flatten(records)
     split_dir = out / "data" / split
     split_dir.mkdir(parents=True, exist_ok=True)
@@ -274,8 +256,6 @@ def build(split, records, out, *, shard_mb=8):
     total = 0
     shard_bytes = shard_mb * 1024 * 1024
     for lang, rows in sorted(by_lang.items()):
-        # Write rows as row-boundary shards so every file stays well under HF's
-        # ~10 MiB per-file ceiling; HF globs data/<split>/*.jsonl into one split.
         shard_idx = 0
         fh = None
         used = 0
