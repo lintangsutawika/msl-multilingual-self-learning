@@ -521,7 +521,11 @@ def write_split(split: str, records: list[dict], out: Path, shard_mb: float = 8)
         print(f"[build] {split}/{lang}: {len(rows)} rows in {shard_idx} shard(s)")
 
 
-def write_readme(out: Path) -> None:
+def write_readme(out: Path, reports: dict[str, list[dict]]) -> None:
+    splits = "\n".join(
+        f"- `{split}`: {sum(not e['drop'] for e in report)} problems x {len(LANGUAGES)} languages = "
+        f"{sum(not e['drop'] for e in report) * len(LANGUAGES)} rows ({len(report)} in the source dataset)"
+        for split, report in reports.items())
     (out / "README.md").write_text("""---
 license: apache-2.0
 language:
@@ -548,14 +552,19 @@ the asserts call `answers_match` (defined at the top of the test source), and
 `reports/dropped.md` lists every dropped problem and test count, and
 `reports/<split>.json` has the details.
 
+## Splits
+
+{splits}
+
 ## Load
 
 ```python
 from datasets import load_dataset
 train = load_dataset("neulab/leetcode", split="train")
 test  = load_dataset("neulab/leetcode", split="test")
+python_rows = test.filter(lambda r: r["language"] == "python")
 ```
-""")
+""".replace("{splits}", splits))
 
 
 def main() -> None:
@@ -585,7 +594,7 @@ def main() -> None:
         if not args.dry_run:
             write_split(split, records[split], args.out, args.shard_mb)
     if not args.dry_run:
-        write_readme(args.out)
+        write_readme(args.out, reports)
     (report_dir / "dropped.md").write_text(drop_list(reports))
     summary = "\n\n".join(summaries)
     (report_dir / "summary.txt").write_text(summary + "\n")
