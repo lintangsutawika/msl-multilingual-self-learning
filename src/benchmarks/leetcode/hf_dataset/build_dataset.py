@@ -415,14 +415,11 @@ def summarize(split: str, report: list[dict]) -> str:
 
 
 def mark_overlap(train: list[dict], test: list[dict]) -> None:
-    """Flag train problems that LeetCode links to a test problem (either direction), or that share its id."""
-    test_slugs = {e["task_id"] for e in test}
-    test_ids = {e["question_id"] for e in test}
-    linked = {s for e in test for s in e.get("similar", [])}
+    """Record the test problems LeetCode links to each train problem (listed on either page)."""
     for e in train:
-        hits = sorted((set(e.get("similar", [])) & test_slugs) | ({e["task_id"]} & linked))
-        if e["question_id"] in test_ids:
-            hits.append("same question_id")
+        hits = [f"{t['question_id']} {t['task_id']}" for t in test
+                if t["task_id"] in e.get("similar", []) or e["task_id"] in t.get("similar", [])
+                or t["question_id"] == e["question_id"]]
         if hits:
             e["similar_to_test"] = hits
 
