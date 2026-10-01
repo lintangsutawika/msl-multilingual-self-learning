@@ -13,7 +13,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from .constraints import MIN_VALID_TESTS, audit_problem, filter_canonical_tests, test_cases
+from .constraints import MIN_VALID_TESTS, audit_problem, filter_canonical_tests
 
 # LeetCode metaData types that JSON test values cannot carry to every language yet.
 UNSUPPORTED_TYPES = re.compile(r"\b(TreeNode|ListNode|Node)\b")
@@ -124,20 +124,6 @@ def public_examples(question: dict[str, Any], names: list[str]) -> list[dict[str
         if len(values) == len(names):
             examples.append(dict(zip(names, values)))
     return examples
-
-
-def public_tests(source: str, names: list[str], examples: list[dict[str, Any]]) -> tuple[str, int]:
-    """(check(candidate) source of the cleaned tests whose inputs are the page's examples,
-    in page order; number of examples with no such test)."""
-    problem = {"metadata": {"canonical_parameter_names": names}, "canonical_tests": {"source": source}}
-    by_input = {}
-    for test, env in test_cases(problem):
-        by_input.setdefault(json.dumps(env, sort_keys=True), test)
-    found = [by_input.get(json.dumps(example, sort_keys=True)) for example in examples]
-    asserts = [t for t in dict.fromkeys(found) if t]
-    if not asserts:
-        return "", len(examples)
-    return "def check(candidate):\n" + "".join(f"    {t}\n" for t in asserts), found.count(None)
 
 
 def clean_tests(problem: dict[str, Any], content: str,
@@ -296,10 +282,8 @@ def summarize(split: str, report: list[dict], n_languages: int) -> str:
         extra = f"   (in {affected} kept problems)" if group != "total" else ""
         lines.append(f"    {group:30} {count(tested):7} / {count(kept):7}{extra}")
 
-    examples = sum(e["public_tests"]["examples"] for e in kept)
-    missing = sum(e["public_tests"]["missing"] for e in kept)
-    lines.append(f"  public examples in kept problems: {examples}, {examples - missing} in public_tests, "
-                 f"{missing} not among the tests (in {sum(1 for e in kept if e['public_tests']['missing'])} problems)")
+    lines.append(f"  public_tests: {sum(e['public_tests'] for e in kept)} testcase inputs in "
+                 f"{sum(1 for e in kept if e['public_tests'])} kept problems")
     lines.append(f"  hints: {sum(len(e['hints']) for e in kept)} in {sum(1 for e in kept if e['hints'])} kept problems")
     lines += ["", "  Categories among kept problems:", f"    {'category':36} {'problems':>8} {'rows':>6}  ids"]
     by_flag: dict[str, list[dict]] = {}

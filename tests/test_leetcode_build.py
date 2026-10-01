@@ -1,7 +1,7 @@
 """Dataset build: answers that exact `==` would wrongly reject get a fitting comparison."""
 import unittest
 
-from src.benchmarks.leetcode.hf_dataset.clean import apply_comparison, apply_drop_categories, comparison_for, public_tests
+from src.benchmarks.leetcode.hf_dataset.clean import apply_comparison, apply_drop_categories, comparison_for
 
 SOURCE = "def check(candidate):\n    assert candidate(x = 1) == EXPECTED\n"
 
@@ -40,18 +40,6 @@ class ComparisonTests(unittest.TestCase):
         self.assertTrue(passes("float", "[1.0, 2.5]", [1.000001, 2.5]))
         self.assertFalse(passes("float", "2.4166666666666665", 2.4167))
         self.assertFalse(passes("float", "[1.0, 2.5]", [1.0]))
-
-
-class PublicTestTests(unittest.TestCase):
-    def test_examples_are_taken_from_the_cleaned_tests_in_page_order(self):
-        source = ("def check(candidate):\n    assert candidate(x = [1], k = 2) == 3\n"
-                  "    assert candidate(x = [5], k = 0) == 5\n    assert candidate(x = [7], k = 1) == 8\n")
-        examples = [{"x": [7], "k": 1}, {"x": [1], "k": 2}, {"x": [9], "k": 9}]
-        public, missing = public_tests(source, ["x", "k"], examples)
-        self.assertEqual(public, "def check(candidate):\n    assert candidate(x=[7], k=1) == 8\n"
-                                 "    assert candidate(x=[1], k=2) == 3\n")
-        self.assertEqual(missing, 1)
-        self.assertEqual(public_tests(source, ["x", "k"], [{"x": [9], "k": 9}]), ("", 1))
 
 
 class DropCategoryTests(unittest.TestCase):

@@ -205,9 +205,10 @@ cd ../neulab-leetcode && git add -A && git commit -m "Rebuild" && git push
   a decimal, the asserts call `answers_match` (defined at the top of the test
   source: top-level order ignored, or 1e-5 tolerance), and
   `canonical_tests.comparison` says which.
-* **Extra columns**: `public_tests` (the page's examples, in the same form as
-  `canonical_tests`) and `hints` (the page's hints as plain text); not shown to
-  the model unless a prompt uses them.
+* **Extra columns**: `public_tests` (the inputs of LeetCode's Testcase panel,
+  one string per case, one JSON value per line in parameter order; no outputs)
+  and `hints` (the page's hints as plain text); not shown to the model unless a
+  prompt uses them.
 * **Dropped problems**: premium, tree/linked-list inputs, in-place answers
   (LeetCodeDataset only checks `== None`), fewer than 10 valid tests, and in
   the test split also several valid answers or text that refers to a figure.

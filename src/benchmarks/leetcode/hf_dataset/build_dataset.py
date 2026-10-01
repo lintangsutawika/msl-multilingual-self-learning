@@ -29,7 +29,6 @@ from .clean import (
     mark_overlap,
     problem_drops,
     public_examples,
-    public_tests,
     summarize,
 )
 from .crawl import DEFAULT_CACHE_DIR, load_or_fetch
@@ -113,7 +112,6 @@ def _build_record(
     interfaces: dict[str, Any],
     description: str,
     tests: str,
-    public: str,
     entry: dict[str, Any],
 ) -> dict[str, Any]:
     return {
@@ -127,12 +125,9 @@ def _build_record(
             "source": apply_comparison(tests, entry["comparison"]),
             "comparison": entry["comparison"],
         },
-        # The page's examples that are among the cleaned tests, in the same form.
-        "public_tests": {
-            "language": "python",
-            "source": apply_comparison(public, entry["comparison"]) if public else "",
-            "comparison": entry["comparison"],
-        },
+        # LeetCode's Testcase panel (exampleTestcaseList): one string per case, one JSON
+        # value per line in parameter order. Inputs only: LeetCode publishes no outputs.
+        "public_tests": question.get("exampleTestcaseList") or [],
         "hints": entry["hints"],
         "metadata": {
             "canonical_parameter_names": entry["parameter_names"],
@@ -195,10 +190,9 @@ def build_problem(
     entry.update(test_report)
     if entry["drop"]:
         return None, entry
-    public, missing = public_tests(tests, entry["parameter_names"], examples)
-    entry["public_tests"] = {"examples": len(examples), "missing": missing}
+    entry["public_tests"] = len(question.get("exampleTestcaseList") or [])
     entry["hints"] = [html_to_text(h).text.strip() for h in question.get("hints") or []]
-    return _build_record(problem, question, crawled, interfaces, description.text, tests, public, entry), entry
+    return _build_record(problem, question, crawled, interfaces, description.text, tests, entry), entry
 
 
 SPLITS = ("train", "test")
@@ -319,9 +313,9 @@ The test split also drops problems with several valid answers or whose text
 refers to a figure. Where answers may come in any order or are decimals,
 the asserts call `answers_match` (defined at the top of the test source), and
 `canonical_tests.comparison` says which rule applies ("unordered", "float" or "exact").
-`public_tests` holds the problem page's examples in the same form as
-`canonical_tests` (the ones among the cleaned tests), and `hints` the page's
-hints as plain text.
+`public_tests` holds the inputs of LeetCode's Testcase panel (one string per
+case, one JSON value per line in parameter order; LeetCode publishes no
+outputs), and `hints` the page's hints as plain text.
 `reports/dropped.md` lists every dropped problem and test count, and
 `reports/<split>.json` has the details.
 
