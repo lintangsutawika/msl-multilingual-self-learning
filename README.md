@@ -184,13 +184,12 @@ pushed to Hugging Face; task generation uses its rows as they are.
 
 ```bash
 git clone https://huggingface.co/datasets/neulab/leetcode ../neulab-leetcode
-# 1. Crawl each problem's LeetCode page: one request every ~2 s, about 2 hours the
-#    first time; resumable, cached in ~/.cache/msl-leetcode/raw.
-uv run python -m src.benchmarks.leetcode.hf_dataset.crawl --rate-delay 2
-# 2. Build into the clone (~2 min). It replaces data/, reports/ and README.md;
-#    --dry-run writes only reports/ (summary.txt, dropped.md) to review first.
-uv run python -m src.benchmarks.leetcode.hf_dataset.build_dataset --out ../neulab-leetcode
-# 3. Publish: `add -A` also records the deletion of data files a build no longer writes.
+# Build into the clone. The first run fetches each problem's LeetCode page (one
+# request every --rate-delay seconds, ~2 hours; cached in ~/.cache/msl-leetcode/raw,
+# so an interrupted run resumes); later runs take ~2 min. It replaces data/,
+# reports/ and README.md; --dry-run writes only reports/ (summary.txt, dropped.md).
+uv run python -m src.benchmarks.leetcode.hf_dataset.build_dataset --out ../neulab-leetcode --rate-delay 2
+# Publish: `add -A` also records the deletion of data files a build no longer writes.
 cd ../neulab-leetcode && git add -A && git commit -m "Rebuild" && git push
 ```
 
@@ -200,7 +199,7 @@ cd ../neulab-leetcode && git add -A && git commit -m "Rebuild" && git push
 * **Tests**: LeetCodeDataset's `check(candidate)` asserts (inputs plus the
   Python reference's output), minus the ones that are unfair for some language:
   inputs that break the problem's Constraints (`hf_dataset/constraints.py`
-  turns each rule into a check), values that do not fit a declared type
+  turns each rule into a check; `hf_dataset/clean.py` holds the drop rules), values that do not fit a declared type
   (7e9 in Rust/C++/Java's `int`), and expected `inf`/`nan`.
 * **Comparison**: where a list answer may come in any order, or the answer is
   a decimal, the asserts call `answers_match` (defined at the top of the test

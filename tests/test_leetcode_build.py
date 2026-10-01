@@ -1,7 +1,7 @@
 """Dataset build: answers that exact `==` would wrongly reject get a fitting comparison."""
 import unittest
 
-from src.benchmarks.leetcode.hf_dataset.build_dataset import apply_comparison, apply_drop_categories, comparison_for
+from src.benchmarks.leetcode.hf_dataset.clean import apply_comparison, apply_drop_categories, comparison_for
 
 SOURCE = "def check(candidate):\n    assert candidate(x = 1) == EXPECTED\n"
 
