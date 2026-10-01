@@ -16,6 +16,9 @@ WORKSPACE = Path(os.environ.get("LEETCODE_WORKSPACE", "/workspace"))
 TESTS = Path(__file__).parent
 ADAPTERS = Path(os.environ.get("LEETCODE_ADAPTERS", "/opt/leetcode"))
 LOGS = Path(os.environ.get("LEETCODE_LOGS", "/logs/verifier"))
+# Python solutions run on the image's interpreter. Harbor's exec server puts /usr/bin
+# first on PATH, where the Debian python3 pulled in by Harbor's own tools lives.
+SOLUTION_PYTHON = "/usr/local/bin/python3" if Path("/usr/local/bin/python3").exists() else sys.executable
 FILES = {
     "python": "solution.py",
     "cpp": "solution.cpp",
@@ -286,7 +289,7 @@ def prepare(language, config, build):
     finally:
         (LOGS / "normalizations.json").write_text(json.dumps(notes))
     return {
-        "python": [sys.executable, "worker.py"],
+        "python": [SOLUTION_PYTHON, "worker.py"],
         "cpp": [str(build / "runner")],
         "go": [str(build / "runner")],
         "java": ["java", "-cp", ".:/usr/share/java/gson.jar", "Runner"],
