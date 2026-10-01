@@ -56,8 +56,8 @@ class DropCategoryTests(unittest.TestCase):
         test, train = self.report(), self.report()
         self.assertEqual(apply_drop_categories("test", records, test), [{"question_id": 3}])
         self.assertEqual([e["drop"] for e in test], [["multiple_answers"], ["figure_reference"], [], ["premium"]])
-        self.assertEqual(apply_drop_categories("train", records, train), [{"question_id": 1}, {"question_id": 2}])
-        self.assertEqual(train[2]["drop"], ["similar_to_test"])
+        self.assertEqual(apply_drop_categories("train", records, train), records)
+        self.assertEqual(train[2]["drop"], [])
 
 
 if __name__ == "__main__":

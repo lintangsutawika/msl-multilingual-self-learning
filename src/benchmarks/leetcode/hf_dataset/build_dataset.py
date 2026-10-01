@@ -15,8 +15,7 @@ and LeetCode's typed metaData. Then it cleans:
   fit a declared type in some language, or expect inf/nan (constraints.py);
 * problems left with fewer than MIN_VALID_TESTS tests are dropped;
 * per split, DROP_CATEGORIES: the test split drops problems with several valid
-  answers or whose text refers to a figure; train drops problems LeetCode
-  links to a test problem.
+  answers or whose text refers to a figure.
 
 Answers that may come in any order, or are decimals, keep their tests but the
 asserts are rewritten to `answers_match(candidate(...), expected)` (defined in
@@ -425,16 +424,16 @@ def mark_overlap(train: list[dict], test: list[dict]) -> None:
 
 
 # Categories dropped per split, decided on the dry-run report (2026-09-30). The test split
-# keeps only problems we can grade correctly in every language; train keeps what can still
-# give a learning signal but must not overlap the test split.
+# keeps only problems we can grade correctly in every language; train keeps everything that
+# can still give a learning signal. Train problems LeetCode lists as "similar" to a test
+# problem are kept (the links mean related topic, not the same problem) and stay flagged
+# as similar_to_test in the report.
 DROP_CATEGORIES = {
     "test": (
         "multiple_answers",   # no general way to accept every valid answer
         "figure_reference",   # the text points to a figure the model cannot see
     ),
-    "train": (
-        "similar_to_test",    # LeetCode links it to a test problem: keep train and test apart
-    ),
+    "train": (),
 }
 
 
@@ -543,7 +542,7 @@ Tests that break the problem's Constraints, do not fit a declared type in some
 language, or expect inf/nan were removed; problems that take trees or linked
 lists, modify their input in place, or kept fewer than 10 tests were dropped.
 The test split also drops problems with several valid answers or whose text
-refers to a figure; train drops problems LeetCode links to a test problem. Where answers may come in any order or are decimals,
+refers to a figure. Where answers may come in any order or are decimals,
 the asserts call `answers_match` (defined at the top of the test source), and
 `canonical_tests.comparison` says which rule applies ("unordered", "float" or "exact").
 `reports/dropped.md` lists every dropped problem and test count, and
