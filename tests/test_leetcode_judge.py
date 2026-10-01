@@ -169,6 +169,13 @@ class OverflowFilterTests(unittest.TestCase):
         self.assertEqual(dropped[0]["violates"], ["1 <= x[i] <= 10"])
         self.assertEqual(kept, 1)
 
+    def test_unreadable_test_is_dropped(self):
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
+        source = "def check(candidate):\n    assert candidate(x = [1]) == 1\n    assert candidate(x = [1, ..., 9]) == 9\n"
+        filtered, dropped, kept = filter_canonical_tests(self.problem(source))
+        self.assertEqual(filtered, "def check(candidate):\n    assert candidate(x = [1]) == 1\n")
+        self.assertEqual((dropped[0]["unreadable"], kept), (True, 1))
+
     def test_every_test_dropped_leaves_none(self):
         from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
         self.assertEqual(filter_canonical_tests(self.problem("def check(candidate):\n    assert candidate(x = [2**40]) == 1\n"))[2], 0)

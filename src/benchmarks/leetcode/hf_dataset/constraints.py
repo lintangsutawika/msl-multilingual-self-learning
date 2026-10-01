@@ -121,6 +121,13 @@ def _test_value(node: ast.AST) -> Any:
         return eval(compile(expression, "<test>", "eval"), {"__builtins__": {}, **_TEST_NAMES})
 
 
+def _plain_value(value: Any) -> bool:
+    """Whether the JSON transport can carry the value to every language."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+    return isinstance(value, (list, tuple)) and all(_plain_value(v) for v in value)
+
+
 def filter_canonical_tests(
     problem: dict[str, Any],
     invalid: dict[str, list[str]] | None = None,
@@ -153,9 +160,12 @@ def filter_canonical_tests(
             keywords = {k.arg: _test_value(k.value) for k in call.keywords}
             expected = _test_value(node.test.comparators[0])
         except (ValueError, TypeError, SyntaxError, RecursionError):
-            continue
-        values += [keywords[n] for n in names[len(values):] if n in keywords]
-        if len(values) != len(names):
+            values = None
+        if values is not None:
+            values += [keywords[n] for n in names[len(values):] if n in keywords]
+        if values is None or len(values) != len(names) or not _plain_value([values, expected]):
+            # Not a plain value (e.g. a literal `...` copied from an abbreviated example): unchecked, so dropped.
+            dropped.append({"line": node.lineno, "end_line": node.end_lineno, "unreadable": True})
             continue
         languages = _unrepresentable_languages(problem, values, expected)
         if languages:
