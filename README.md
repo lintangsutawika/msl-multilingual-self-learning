@@ -183,10 +183,15 @@ code, wrong answers and crashes count as failures.
 pushed to Hugging Face; task generation uses its rows as they are.
 
 ```bash
-# 1. Crawl each problem's LeetCode page (resumable, cached in ~/.cache/msl-leetcode/raw).
-uv run python -m src.benchmarks.leetcode.hf_dataset.crawl
-# 2. Build into a local clone of the HF dataset repo (--dry-run writes only reports/).
+git clone https://huggingface.co/datasets/neulab/leetcode ../neulab-leetcode
+# 1. Crawl each problem's LeetCode page: one request every ~2 s, about 2 hours the
+#    first time; resumable, cached in ~/.cache/msl-leetcode/raw.
+uv run python -m src.benchmarks.leetcode.hf_dataset.crawl --rate-delay 2
+# 2. Build into the clone (~2 min). It replaces data/, reports/ and README.md;
+#    --dry-run writes only reports/ (summary.txt, dropped.md) to review first.
 uv run python -m src.benchmarks.leetcode.hf_dataset.build_dataset --out ../neulab-leetcode
+# 3. Publish: `add -A` also records the deletion of data files a build no longer writes.
+cd ../neulab-leetcode && git add -A && git commit -m "Rebuild" && git push
 ```
 
 * **Description**: taken from the LeetCode page with exponents (`10^9`, not

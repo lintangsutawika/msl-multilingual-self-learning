@@ -37,3 +37,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/msl_multilingual_self_learning"]
+
+[tool.pytest.ini_options]
+# Tests import the benchmark as src.benchmarks.leetcode...
+pythonpath = ["."]
