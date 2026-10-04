@@ -24,7 +24,7 @@ model:
     # Cap each response: with no max_tokens vLLM generates up to max_model_len
     # (262144), and a thinking loop then hangs one request for the whole agent
     # budget (seen as step-0 AgentTimeoutErrors in tasks-b).
-    max_tokens: 32768
+    max_tokens: 16384
     # Per-request litellm timeout (overrides harbor's 3600s default); fits a
     # full 32768-token response under load, fails a wedged request early.
     timeout: 1200
