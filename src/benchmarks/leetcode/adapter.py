@@ -70,6 +70,25 @@ def canonical_names(problem: dict[str, Any]) -> list[str]:
     return names
 
 
+def _extract_public_cases(canonical_tests: dict) -> str:
+    """Extract the public/example test cases from the canonical Python judge source.
+
+    The neulab/leetcode dataset stores the public cases as ``assert candidate(...)``
+    lines in ``canonical_tests.source`` (the same check() oracle used for grading),
+    so surfacing them in the agent's instructions gives concrete input->expected
+    examples. Returns a single formatted block (empty if none found).
+    """
+    source = (canonical_tests or {}).get("source") or ""
+    lines = [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip().startswith("assert candidate(")
+    ]
+    if not lines:
+        return ""
+    return "\n".join(lines)
+
+
 def _fill(path: Path, **kw: str) -> None:
     text = path.read_text()
     for k, v in kw.items():
@@ -320,6 +339,7 @@ def generate(
         "container": container,
         "problem": row["problem_description"].strip(),
         "source_file": source_file,
+        "public_cases": _extract_public_cases(row.get("canonical_tests")),
     }
     _fill(task / "task.toml", **fills)
     _fill(task / "instruction.md", **fills)

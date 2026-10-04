@@ -13,5 +13,9 @@ imports.
 Save your final solution to /workspace/{source_file} (the working directory is
 /workspace). Write only that source file, without Markdown fences or explanations.
 
+Public test cases:
+{public_cases}
+
+
 When the file is written and you are done, issue the command:
     echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
