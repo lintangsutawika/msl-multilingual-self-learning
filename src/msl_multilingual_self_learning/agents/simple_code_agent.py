@@ -8,6 +8,14 @@ from harbor.agents.base import BaseAgent
 from openai import AsyncOpenAI
 
 
+# mini-swe-agent's command for ending a task (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`);
+# models trained on its trajectories sometimes append it to a plain code answer.
+SUBMIT_MARKER = re.compile(
+    r"^[ \t]*echo[ \t]+['\"]?COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT['\"]?[ \t;]*$\n?",
+    flags=re.MULTILINE,
+)
+
+
 class SimpleCodeAgent(BaseAgent):
     @staticmethod
     def name() -> str:
@@ -39,12 +47,21 @@ class SimpleCodeAgent(BaseAgent):
         if "</think>" in text:
             text = text.rsplit("</think>", 1)[-1].strip()
 
-        # Prefer the final fenced code block when one is present.
-        fenced_blocks = re.findall(
-            r"```(?:[A-Za-z0-9_+#.\-]+)?\s*\n(.*?)```",
-            text,
-            flags=re.DOTALL,
-        )
+        # Drop mini-swe-agent's "task done" command, which the model sometimes
+        # appends to its code; it is not part of the solution.
+        text = SUBMIT_MARKER.sub("", text).strip()
+
+        # Prefer the final fenced code block when one is present (skipping
+        # blocks left empty, e.g. one that only held the marker).
+        fenced_blocks = [
+            block
+            for block in re.findall(
+                r"```(?:[A-Za-z0-9_+#.\-]+)?\s*\n(.*?)```",
+                text,
+                flags=re.DOTALL,
+            )
+            if block.strip()
+        ]
 
         if fenced_blocks:
             return fenced_blocks[-1].strip()
@@ -169,6 +186,10 @@ class SimpleCodeAgent(BaseAgent):
             raise RuntimeError(
                 "Model returned no content"
             )
+
+        # Keep the raw reply next to solution.json for review (what extraction removed).
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / "response.txt").write_text(content, encoding="utf-8")
 
         code = self._strip_markdown_fences(
             content
