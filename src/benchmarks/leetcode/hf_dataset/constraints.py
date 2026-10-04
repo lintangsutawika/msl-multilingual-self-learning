@@ -128,12 +128,37 @@ def _plain_value(value: Any) -> bool:
     return isinstance(value, (list, tuple)) and all(_plain_value(v) for v in value)
 
 
+def _has_decimal(value: Any, whole_ok: bool = False) -> bool:
+    """A finite float anywhere in the value (inf/nan are reported as non-finite). With
+    whole_ok, exact whole numbers such as 59048.0 do not count."""
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return False
+        return not (whole_ok and value.is_integer() and abs(value) <= 2**53)
+    return isinstance(value, (list, tuple)) and any(_has_decimal(v, whole_ok) for v in value)
+
+
+def _decimal_for_integer(problem: dict[str, Any], args: list[Any], expected: Any) -> bool:
+    """Whether a test passes a decimal where LeetCode declares integers (Python types, e.g.
+    int or List[List[int]]): Go and Rust cannot even parse it, others round it. An expected
+    answer may be a whole-number float (59048.0 == 59048 in the Python comparison), but not
+    10.5, which no integer answer can equal."""
+    python = problem.get("interfaces", {}).get("python")
+    if not python:
+        return False
+    integer = lambda t: re.search(r"\bint\b", t) is not None and "float" not in t
+    types = [p["type"] for p in python["parameters"]]
+    if any(integer(t) and _has_decimal(v) for t, v in zip(types, args)):
+        return True
+    return integer(python["return_type"]) and _has_decimal(expected, whole_ok=True)
+
+
 def filter_canonical_tests(
     problem: dict[str, Any],
     invalid: dict[str, list[str]] | None = None,
 ) -> tuple[str, list[dict[str, Any]], int]:
-    """Drop tests that do not fit a declared type in some language, expect inf/nan,
-    or are listed in `invalid` (assert source -> violated rules).
+    """Drop tests that do not fit a declared type in some language, pass a decimal where an
+    integer is declared, expect inf/nan, or are listed in `invalid` (assert source -> violated rules).
 
     Returns (source, dropped, number of test cases kept).
     """
@@ -166,6 +191,9 @@ def filter_canonical_tests(
         if values is None or len(values) != len(names) or not _plain_value([values, expected]):
             # Not a plain value (e.g. a literal `...` copied from an abbreviated example): unchecked, so dropped.
             dropped.append({"line": node.lineno, "end_line": node.end_lineno, "unreadable": True})
+            continue
+        if _decimal_for_integer(problem, values, expected):
+            dropped.append({"line": node.lineno, "end_line": node.end_lineno, "decimal_in_integer": True})
             continue
         languages = _unrepresentable_languages(problem, values, expected)
         if languages:

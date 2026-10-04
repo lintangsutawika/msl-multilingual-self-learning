@@ -138,6 +138,8 @@ def clean_tests(problem: dict[str, Any], content: str,
             reasons["constraint_violation"] += 1
         elif d.get("unreadable"):
             reasons["unreadable"] += 1
+        elif d.get("decimal_in_integer"):
+            reasons["decimal_in_integer"] += 1
         elif set(d["unrepresentable_in"]) >= set(problem["interfaces"]):
             reasons["non_finite"] += 1
         else:
@@ -273,7 +275,7 @@ def summarize(split: str, report: list[dict], n_languages: int) -> str:
 
     tested = [e for e in report if "tests" in e]
     lines += ["", f"  Tests (all {len(tested)} problems whose tests were checked / the {len(kept)} kept problems):"]
-    for group in ("total", "constraint_violation", "int_overflow", "non_finite", "unreadable"):
+    for group in ("total", "constraint_violation", "int_overflow", "non_finite", "unreadable", "decimal_in_integer"):
         def count(entries, group=group):
             if group == "total":
                 return sum(e["tests"]["total"] for e in entries)
@@ -316,12 +318,12 @@ def drop_list(reports: dict[str, list[dict]]) -> str:
         cleaned = [e for e in kept if e["tests"]["dropped"]]
         total = sum(sum(e["tests"]["dropped"].values()) for e in cleaned)
         lines += ["", f"### {split}: tests dropped from kept problems ({total} tests in {len(cleaned)} problems)", "",
-                  "| question_id | tests | kept | constraint_violation | int_overflow | non_finite | unreadable |",
-                  "|---|---|---|---|---|---|---|"]
+                  "| question_id | tests | kept | constraint_violation | int_overflow | non_finite | unreadable | decimal_in_integer |",
+                  "|---|---|---|---|---|---|---|---|"]
         for e in sorted(cleaned, key=lambda e: e["question_id"]):
             d = e["tests"]["dropped"]
             lines.append(f"| {e['question_id']} | {e['tests']['total']} | {e['tests']['kept']} | "
                          f"{d.get('constraint_violation', 0)} | {d.get('int_overflow', 0)} | {d.get('non_finite', 0)} | "
-                         f"{d.get('unreadable', 0)} |")
+                         f"{d.get('unreadable', 0)} | {d.get('decimal_in_integer', 0)} |")
         lines.append("")
     return "\n".join(lines)

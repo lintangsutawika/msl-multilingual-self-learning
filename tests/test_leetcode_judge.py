@@ -176,6 +176,20 @@ class OverflowFilterTests(unittest.TestCase):
         self.assertEqual(filtered, "def check(candidate):\n    assert candidate(x = [1]) == 1\n")
         self.assertEqual((dropped[0]["unreadable"], kept), (True, 1))
 
+    def test_decimal_for_an_integer_parameter_is_dropped(self):
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
+        source = "def check(candidate):\n    assert candidate(x = [1, 2]) == 3\n    assert candidate(x = [10.5, 2]) == 3\n"
+        filtered, dropped, kept = filter_canonical_tests(self.problem(source))
+        self.assertEqual(filtered, "def check(candidate):\n    assert candidate(x = [1, 2]) == 3\n")
+        self.assertEqual((dropped[0]["decimal_in_integer"], kept), (True, 1))
+
+    def test_whole_number_float_answer_is_kept_but_not_a_fraction(self):
+        from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
+        source = "def check(candidate):\n    assert candidate(x = [1, 2]) == 3.0\n    assert candidate(x = [1, 2]) == 2.5\n"
+        filtered, dropped, kept = filter_canonical_tests(self.problem(source))
+        self.assertEqual(filtered, "def check(candidate):\n    assert candidate(x = [1, 2]) == 3.0\n")
+        self.assertEqual(kept, 1)
+
     def test_every_test_dropped_leaves_none(self):
         from src.benchmarks.leetcode.hf_dataset.constraints import filter_canonical_tests
         self.assertEqual(filter_canonical_tests(self.problem("def check(candidate):\n    assert candidate(x = [2**40]) == 1\n"))[2], 0)
