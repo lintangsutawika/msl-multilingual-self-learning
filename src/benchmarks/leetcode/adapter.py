@@ -70,6 +70,49 @@ def canonical_names(problem: dict[str, Any]) -> list[str]:
     return names
 
 
+def _source_contract(interface: dict, language: str) -> str:
+    """A consistent, per-language statement of the exact entrypoint shape the
+    grader's runner invokes, derived from the `interface` field.
+
+    Consistent across tasks within each language, so the model always knows the
+    required symbol/package/class instead of guessing (`package main`, `candidate`,
+    a `main` func, etc.) and failing the compile/entrypoint check.
+    """
+    cont = (interface.get("container") or "").strip()
+    call = (interface.get("callable") or "").strip()
+    if language == "go":
+        return (
+            f"Declare the function `func {call}(...)` inside `package solution` "
+            f"(NOT `package main`, and do not define `func main` -- the grader "
+            f"runs its own driver)."
+        )
+    if language == "rust":
+        return (
+            f"Declare `struct {cont or 'Solution'}` and implement "
+            f"`impl {cont or 'Solution'} {{ fn {call}(...) -> ... }}` "
+            f"(the runner invokes `{cont or 'Solution'}::{call}(...)`)."
+        )
+    if cont:
+        return (
+            f"Declare a class/type `{cont}` exposing a method/function named "
+            f"`{call}` (the runner invokes it as `{cont}.{call}(...)` or "
+            f"`{cont}().{call}(...)`)."
+        )
+    if language == "javascript" or language == "typescript":
+        return (
+            f"Declare the function `{call}` (the runner invokes `{call}(...)`)."
+        )
+    if language == "ruby":
+        return (
+            f"Declare the method `def {call}(...)` (the runner invokes `{call}(...)`)."
+        )
+    # fallback: python / anything with no container
+    return (
+        f"Declare the entrypoint `{call}` exactly as given (match the signature "
+        f"and parameter names)."
+    )
+
+
 def _extract_public_cases(canonical_tests: dict) -> str:
     """Extract the public/example test cases from the canonical Python judge source.
 
@@ -86,7 +129,24 @@ def _extract_public_cases(canonical_tests: dict) -> str:
     ]
     if not lines:
         return ""
-    return "\n".join(lines)
+    # Bound the inlined cases so the agent's --task argv stays well under the OS
+    # per-argument exec limit (Linux MAX_ARG_STRLEN = 128 KB): a handful of cases
+    # with huge inputs (e.g. 10k-element arrays) can exceed it and fail the sandbox
+    # exec with "OSError: [Errno 7] Argument list too long". Keep the full set on
+    # disk (tests/canonical_test.py) and inline a bounded prefix + pointer.
+    max_bytes = 96 * 1024  # safely under the 128 KB single-argument limit
+    block = []
+    used = 0
+    for line in lines:
+        if used + len(line) > max_bytes and block:
+            break
+        block.append(line)
+        used += len(line) + 1
+    out = "\n".join(block)
+    omitted = len(lines) - len(block)
+    if omitted:
+        out += f"\n# ...and {omitted} more public cases in tests/canonical_test.py"
+    return out
 
 
 def _fill(path: Path, **kw: str) -> None:
@@ -340,9 +400,15 @@ def generate(
         "problem": row["problem_description"].strip(),
         "source_file": source_file,
         "public_cases": _extract_public_cases(row.get("canonical_tests")),
+        "source_contract": _source_contract(interface, language),
+        "raw_signature": interface["raw_signature"].strip(),
+        "callable": interface.get("callable", ""),
     }
     _fill(task / "task.toml", **fills)
     _fill(task / "instruction.md", **fills)
+    # Pre-fill the solution stub: the entrypoint is already declared there, so the
+    # agent just edits the body instead of guessing the signature/package/class.
+    _fill(task / "solution" / source_file, **fills)
 
     # Problem-specific verifier artifacts.
     (task / "tests/config.json").write_text(json.dumps({"language": language, "parameter_names": names}))

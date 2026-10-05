@@ -1,21 +1,11 @@
-Language: {language}
-Entrypoint: {entrypoint}
-Container: {container}
+Solve the following problem in the {language} programming language.
 
-Problem:
 {problem}
 
-Solve this LeetCode problem in {language}. Write a complete source file, including
-any required imports, includes, or package declarations. Do not define a program
-entrypoint. Your solution must compile or run as submitted. Do not include unused
-imports.
-
-Save your final solution to /workspace/{source_file} (the working directory is
-/workspace). Write only that source file, without Markdown fences or explanations.
-
-Public test cases:
-{public_cases}
-
+Implement the solution in `/workspace/{source_file}` using the already
+declared signature. Do not rename or redeclare it, and
+do not add a top-level `main`/entrypoint or embed tests (the grader provides its
+own driver).
 
 When the file is written and you are done, issue the command:
     echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT
