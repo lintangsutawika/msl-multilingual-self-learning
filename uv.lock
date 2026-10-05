@@ -1282,7 +1282,7 @@ modal = [
 [[package]]
 name = "harbor-singularity-hpc"
 version = "0.1.0"
-source = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=9bdf48e6c98598ad88833cef3fbe8f6c583332ba#9bdf48e6c98598ad88833cef3fbe8f6c583332ba" }
+source = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=59dd049489cd5cad286e9c08be72542837f502d8#59dd049489cd5cad286e9c08be72542837f502d8" }
 dependencies = [
     { name = "harbor" },
     { name = "httpx" },
@@ -2238,7 +2238,7 @@ dependencies = [
 requires-dist = [
     { name = "datasets" },
     { name = "harbor", extras = ["modal"], git = "https://github.com/harbor-framework/harbor.git?rev=c178c20710c362ef806c5d5d18852f95b21ca34b" },
-    { name = "harbor-singularity-hpc", git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=9bdf48e6c98598ad88833cef3fbe8f6c583332ba" },
+    { name = "harbor-singularity-hpc", git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git?rev=59dd049489cd5cad286e9c08be72542837f502d8" },
     { name = "mini-swe-agent", extras = ["full"], specifier = ">=2.4.5" },
     { name = "requests", specifier = ">=2.34.2" },
     { name = "tqdm" },
