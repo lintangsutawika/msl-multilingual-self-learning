@@ -67,6 +67,30 @@ RELAY_WS_URL="${RELAY_WS_URL:-}"
 RELAY_SECRET="${RELAY_SECRET:-}"
 VLLM_LOCAL_URL="${VLLM_LOCAL_URL:-http://127.0.0.1:${PORT}}"
 
+# --- per-model vLLM serve params (configs/serve/<MODEL>.json) --------------------
+# Model-intrinsic flags (tool/reasoning parsers, dtype, context length) travel WITH the
+# model; node knobs (TP/DP/gpu-mem/sif) stay in the env. Auto-loaded so a direct qsub
+# of this script serves the model with the right parsers/config (run.sbatch does the
+# same for eval). Explicit VLLM_ARGS_EXTRA env override wins.
+VLLM_ARGS_EXTRA="${VLLM_ARGS_EXTRA:-}"
+SERVE_CONFIG="${SERVE_CONFIG:-configs/serve/${MODEL}.json}"
+if [ -z "${VLLM_ARGS_EXTRA:-}" ] && [ -f "${REPO_ROOT}/${SERVE_CONFIG}" ]; then
+    echo "[serve] loading vLLM serve params from ${SERVE_CONFIG}" >&2
+    eval "$(python3 - "${REPO_ROOT}/${SERVE_CONFIG}" <<'PY'
+import json, os, shlex, sys
+c = json.load(open(sys.argv[1]))
+def emit(var, val):
+    if os.environ.get(var):
+        return
+    print(f"{var}={shlex.quote(val)}")
+if isinstance(c.get("extra_args"), list):
+    emit("VLLM_ARGS_EXTRA", " ".join(str(a) for a in c["extra_args"]))
+if c.get("max_model_len"):
+    emit("MAX_MODEL_LEN", str(c["max_model_len"]))
+PY
+)"
+fi
+
 if [ -z "${VLLM_CUDA_SIF}" ]; then
     echo "ERROR: VLLM_CUDA_SIF (or SIF_PATH) not set." >&2
     echo "       Build one first: scripts/build/build_vllm.sh cuda" >&2
