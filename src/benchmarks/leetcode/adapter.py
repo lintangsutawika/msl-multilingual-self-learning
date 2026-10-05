@@ -409,6 +409,17 @@ def generate(
     # Pre-fill the solution stub: the entrypoint is already declared there, so the
     # agent just edits the body instead of guessing the signature/package/class.
     _fill(task / "solution" / source_file, **fills)
+    # The interface/entrypoint contract as JSON (tests/interface.json), consumed
+    # by the verifier: {language, code(of the declared stub), callable, container}.
+    _stub_src = (task / "solution" / source_file).read_text()
+    (task / "tests" / "interface.json").write_text(
+        json.dumps({
+            "language": language,
+            "code": _stub_src,
+            "callable": interface.get("callable", ""),
+            "container": container,
+        }, ensure_ascii=False)
+    )
 
     # Problem-specific verifier artifacts.
     (task / "tests/config.json").write_text(json.dumps({"language": language, "parameter_names": names}))
