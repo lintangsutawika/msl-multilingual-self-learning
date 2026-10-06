@@ -16,9 +16,36 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "task" / "lee
 SAMPLING_KEYS = {"max_tokens", "temperature", "top_p", "extra_body", "timeout", "drop_params"}
 
 
-LANGUAGES = {"python", "cpp", "go", "java", "rust", "javascript", "typescript", "php", "ruby"}
-# A closed fenced block: an opening ``` (optional language tag), the code, a closing ```.
-FENCED_BLOCK = re.compile(r"```(?:[A-Za-z0-9_+#.\-]+)?\s*\n(.*?)```", flags=re.DOTALL)
+# The 9 task languages and the fence tags models use for each (```c++, ```js, ...).
+LANGUAGE_TAGS = {
+    "python": {"python", "py", "python3"},
+    "cpp": {"cpp", "c++", "cxx", "cc"},
+    "go": {"go", "golang"},
+    "java": {"java"},
+    "rust": {"rust", "rs"},
+    "javascript": {"javascript", "js", "node", "nodejs"},
+    "typescript": {"typescript", "ts"},
+    "php": {"php"},
+    "ruby": {"ruby", "rb"},
+}
+LANGUAGES = set(LANGUAGE_TAGS)
+# A closed fenced block: an opening ``` with an optional tag (rest of that line ignored),
+# the code, and a closing ```.
+FENCED_BLOCK = re.compile(r"```[ \t]*([A-Za-z0-9_+#.\-]*)[^\n]*\n(.*?)```", flags=re.DOTALL)
+
+
+def extract_code(answer: str, language: str) -> tuple[str, str] | None:
+    """(code, rule) from a final answer (the text after </think>):
+      language_block -- the last non-empty block tagged with the task's language,
+      other_block    -- else the last non-empty block with any other tag or none.
+    None when the answer has no non-empty closed block."""
+    blocks = [(tag.lower(), code.strip()) for tag, code in FENCED_BLOCK.findall(answer) if code.strip()]
+    tagged = [code for tag, code in blocks if tag in LANGUAGE_TAGS[language]]
+    if tagged:
+        return tagged[-1], "language_block"
+    if blocks:
+        return blocks[-1][1], "other_block"
+    return None
 
 
 # The model's own failures, under their own names so a resume filter on RuntimeError
@@ -31,12 +58,6 @@ class EmptySolutionError(Exception):
     """The reply held no source code."""
 
 
-# mini-swe-agent's command for ending a task (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`);
-# models trained on its trajectories sometimes append it to a plain code answer.
-SUBMIT_MARKER = re.compile(
-    r"^[ \t]*echo[ \t]+['\"]?COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT['\"]?[ \t;]*$\n?",
-    flags=re.MULTILINE,
-)
 
 
 class SimpleCodeAgent(BaseAgent):
@@ -77,7 +98,7 @@ class SimpleCodeAgent(BaseAgent):
         return "simple-code-agent"
 
     def version(self) -> str:
-        return "0.6.0"
+        return "0.7.0"
 
     def _messages(self, instruction: str) -> list[dict[str, str]]:
         """System and user messages: the task text up to agent.drop_task_from (the
@@ -103,44 +124,25 @@ class SimpleCodeAgent(BaseAgent):
         """
         return None
 
-    def _strip_markdown_fences(
-        self,
-        text: str,
-    ) -> str:
-        text = text.strip()
-
-        # Some models may emit a reasoning section even when thinking is
-        # disabled. Keep only the content after the final </think> marker.
-        if "</think>" in text:
-            text = text.rsplit("</think>", 1)[-1].strip()
-
-        # Drop mini-swe-agent's "task done" command, which the model sometimes
-        # appends to its code; it is not part of the solution.
-        text = SUBMIT_MARKER.sub("", text).strip()
-
-        # Prefer the final fenced code block when one is present (skipping
-        # blocks left empty, e.g. one that only held the marker).
-        fenced_blocks = [block for block in FENCED_BLOCK.findall(text) if block.strip()]
-
-        if fenced_blocks:
-            return fenced_blocks[-1].strip()
-
-        return text
-
     def _thinking(self) -> bool:
         kwargs = (self._request_kwargs.get("extra_body") or {}).get("chat_template_kwargs") or {}
         return bool(kwargs.get("enable_thinking"))
 
-    def _code_from_cut_off_reply(self, content: str) -> str:
-        """Code from a reply that hit max_tokens: only a complete (closed) code block in the
-        final answer counts. Cut off while still thinking (no </think> yet), any code is a
-        draft; cut off inside an open block, the code is unfinished."""
-        if self._thinking() and "</think>" not in content:
+    def _extract(self, content: str, language: str, cut_off: bool) -> tuple[str, str]:
+        """(code, rule) from the reply. Only the final answer counts (the text after the
+        last </think>). A block tagged with the task's language wins over other blocks; a
+        reply with no block is taken whole (rule whole_text). A reply that hit max_tokens
+        needs a closed block: cut off while still thinking (no </think> yet) any code is a
+        draft, and cut off inside an open block the code is unfinished."""
+        if cut_off and self._thinking() and "</think>" not in content:
             raise ResponseTruncatedError("Reply hit max_tokens while still thinking")
-        answer = content.rsplit("</think>", 1)[-1]
-        if not any(block.strip() for block in FENCED_BLOCK.findall(SUBMIT_MARKER.sub("", answer))):
+        answer = content.rsplit("</think>", 1)[-1].strip()
+        found = extract_code(answer, language)
+        if found:
+            return found
+        if cut_off:
             raise ResponseTruncatedError("Reply hit max_tokens with no complete code block")
-        return self._strip_markdown_fences(answer)
+        return answer, "whole_text"
 
     async def run(
         self,
@@ -213,16 +215,15 @@ class SimpleCodeAgent(BaseAgent):
         # Keep the raw reply (cut off or not) and its length next to solution.json for review.
         (self.logs_dir / "response.txt").write_text(content, encoding="utf-8")
         usage = response.usage
-        (self.logs_dir / "usage.json").write_text(json.dumps({
+        record = {
             "finish_reason": choice.finish_reason,
             "prompt_tokens": usage.prompt_tokens if usage else None,
             "completion_tokens": usage.completion_tokens if usage else None,
-        }), encoding="utf-8")
+        }
+        (self.logs_dir / "usage.json").write_text(json.dumps(record), encoding="utf-8")
 
-        if choice.finish_reason == "length":
-            code = self._code_from_cut_off_reply(content)
-        else:
-            code = self._strip_markdown_fences(content)
+        code, record["code_from"] = self._extract(content, language, cut_off=choice.finish_reason == "length")
+        (self.logs_dir / "usage.json").write_text(json.dumps(record), encoding="utf-8")
         if not code:
             raise EmptySolutionError("Model returned no source code")
 

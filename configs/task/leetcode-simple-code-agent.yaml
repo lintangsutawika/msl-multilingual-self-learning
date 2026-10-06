@@ -3,8 +3,8 @@
 # mini-swe-agent keeps using configs/task/leetcode.yaml and the task's full instruction.md.
 agent:
   system_template: >
-    You are a coding assistant. Return only the complete source code for the
-    requested solution. Do not include Markdown fences or explanations.
+    You are a coding assistant. Return the complete solution as a single Markdown
+    code block in the requested language. Do not include explanations or examples.
   instance_template: |
     {{task}}
   # instruction.md ends with mini-swe-agent's submission steps (save the file under

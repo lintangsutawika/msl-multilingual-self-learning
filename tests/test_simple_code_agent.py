@@ -10,7 +10,7 @@ from unittest import mock
 
 from msl_multilingual_self_learning.agents import simple_code_agent
 from msl_multilingual_self_learning.agents.simple_code_agent import (
-    DEFAULT_CONFIG, EmptySolutionError, ResponseTruncatedError, SimpleCodeAgent)
+    DEFAULT_CONFIG, EmptySolutionError, ResponseTruncatedError, SimpleCodeAgent, extract_code)
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = REPO / "src" / "benchmarks" / "leetcode"
@@ -86,56 +86,64 @@ class PromptTests(unittest.TestCase):
             agent(str(mini_swe_config))
 
 
-def extract(reply):
-    return SimpleCodeAgent._strip_markdown_fences(types.SimpleNamespace(), reply)
-
-
 class ExtractCodeTests(unittest.TestCase):
-    def test_reasoning_and_fences_are_removed(self):
-        self.assertEqual(extract("<think>plan</think>\n```cpp\nint f();\n```"), "int f();")
+    """extract_code: the task language's block wins, then any block; None without a block."""
 
-    def test_mini_swe_agent_marker_is_removed(self):
-        marker = "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
-        self.assertEqual(extract(f"class S {{\n}};\n\n{marker}\n"), "class S {\n};")
-        self.assertEqual(extract(f"```php\n<?php\nclass S {{}}\n{marker}\n```"), "<?php\nclass S {}")
+    def test_block_in_the_task_language_wins_over_a_later_example(self):
+        answer = "```rust\nfn f() -> i32 { 1 }\n```\nUsage:\n```bash\ncargo run\n```"
+        self.assertEqual(extract_code(answer, "rust"), ("fn f() -> i32 { 1 }", "language_block"))
 
-    def test_marker_only_fence_does_not_replace_the_code(self):
-        reply = "```go\nfunc f() int { return 1 }\n```\n\n```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```"
-        self.assertEqual(extract(reply), "func f() int { return 1 }")
+    def test_last_block_of_the_language_is_taken(self):
+        answer = "```python\ndef f(): return 0\n```\nBetter:\n```python\ndef f(): return 1\n```"
+        self.assertEqual(extract_code(answer, "python"), ("def f(): return 1", "language_block"))
 
-    def test_marker_text_inside_code_is_kept(self):
-        code = "def f():\n    print('echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT')"
-        self.assertEqual(extract(f"```python\n{code}\n```"), code)
+    def test_common_tag_spellings_count_as_the_language(self):
+        for language, tag in [("cpp", "c++"), ("cpp", "C++"), ("javascript", "js"), ("typescript", "ts"),
+                              ("go", "golang"), ("python", "py"), ("ruby", "rb"), ("rust", "rs")]:
+            with self.subTest(tag=tag):
+                self.assertEqual(extract_code(f"```{tag}\ncode\n```", language), ("code", "language_block"))
+
+    def test_untagged_or_other_block_is_used_when_no_language_block(self):
+        self.assertEqual(extract_code("```\nint f();\n```", "cpp"), ("int f();", "other_block"))
+        self.assertEqual(extract_code("```c\nint f();\n```", "cpp"), ("int f();", "other_block"))
+
+    def test_empty_blocks_and_open_blocks_do_not_count(self):
+        self.assertIsNone(extract_code("```python\n\n```", "python"))
+        self.assertIsNone(extract_code("```python\ndef f():", "python"))
+        self.assertIsNone(extract_code("def f(): return 1", "python"))
 
 
 THINKING_OFF = "model:\n  model_kwargs:\n    max_tokens: 100\n    extra_body:\n      chat_template_kwargs:\n        enable_thinking: false\n"
 
 
-class CutOffReplyTests(unittest.TestCase):
-    """A reply that hit max_tokens is graded only if its final answer has a closed code block."""
+class ExtractReplyTests(unittest.TestCase):
+    """_extract: only the final answer counts; a cut-off reply needs a closed block."""
+
+    def test_thinking_is_dropped(self):
+        reply = "```python\ndraft\n```</think>\n```python\ndef f(): return 1\n```"
+        self.assertEqual(agent()._extract(reply, "python", cut_off=False), ("def f(): return 1", "language_block"))
+
+    def test_reply_without_a_block_is_taken_whole(self):
+        reply = "plan</think>\n\nfunc f() int { return 1 }\n"
+        self.assertEqual(agent()._extract(reply, "go", cut_off=False), ("func f() int { return 1 }", "whole_text"))
 
     def test_cut_off_while_thinking_is_not_graded(self):
         with self.assertRaisesRegex(ResponseTruncatedError, "still thinking"):
-            agent()._code_from_cut_off_reply("plan... ```python\ndef f(): pass\n``` more planning")
+            agent()._extract("plan... ```python\ndef f(): pass\n``` more planning", "python", cut_off=True)
 
     def test_closed_block_after_thinking_is_graded(self):
         reply = "plan</think>\n```python\ndef f():\n    return 1\n```\nThis runs in O(1) because"
-        self.assertEqual(agent()._code_from_cut_off_reply(reply), "def f():\n    return 1")
+        self.assertEqual(agent()._extract(reply, "python", cut_off=True), ("def f():\n    return 1", "language_block"))
 
     def test_cut_off_inside_an_open_block_is_not_graded(self):
         reply = "```cpp\nint f() {\n    // Actually, let's use a different approach:\n    // Actually"
         with self.assertRaisesRegex(ResponseTruncatedError, "no complete code block"):
-            agent(sampling_file=sampling(THINKING_OFF))._code_from_cut_off_reply(reply)
+            agent(sampling_file=sampling(THINKING_OFF))._extract(reply, "cpp", cut_off=True)
 
     def test_closed_block_without_thinking_is_graded(self):
         reply = "```go\nfunc f() int { return 1 }\n```\nExplanation: the loop"
-        self.assertEqual(agent(sampling_file=sampling(THINKING_OFF))._code_from_cut_off_reply(reply),
-                         "func f() int { return 1 }")
-
-    def test_marker_only_block_is_not_complete_code(self):
-        reply = "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```\n```rust\nfn f"
-        with self.assertRaises(ResponseTruncatedError):
-            agent(sampling_file=sampling(THINKING_OFF))._code_from_cut_off_reply(reply)
+        self.assertEqual(agent(sampling_file=sampling(THINKING_OFF))._extract(reply, "go", cut_off=True),
+                         ("func f() int { return 1 }", "language_block"))
 
 
 class FakeClient:
@@ -182,7 +190,9 @@ class RunTests(unittest.TestCase):
         self.assertEqual(FakeClient.settings["timeout"], 1200.0)
         self.assertEqual(FakeClient.request["max_tokens"], 32768)
         self.assertEqual(json.loads((a.logs_dir / "solution.json").read_text()), {"language": "rust", "code": "fn f() {}"})
-        self.assertEqual(json.loads((a.logs_dir / "usage.json").read_text())["finish_reason"], "stop")
+        self.assertEqual(json.loads((a.logs_dir / "usage.json").read_text()),
+                         {"finish_reason": "stop", "prompt_tokens": 7, "completion_tokens": 100,
+                          "code_from": "language_block"})
         self.assertIn("/workspace/solution.json", env.commands[-1])
 
     def test_cut_off_reply_is_saved_before_failing(self):
