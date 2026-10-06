@@ -34,6 +34,17 @@ LANGUAGES = set(LANGUAGE_TAGS)
 FENCED_BLOCK = re.compile(r"```[ \t]*([A-Za-z0-9_+#.\-]*)[^\n]*\n(.*?)```", flags=re.DOTALL)
 
 
+PROVIDER_PREFIXES = ("openai/", "litellm_proxy/", "hosted_vllm/")
+
+
+def bare_model_name(model_name: str) -> str:
+    """The served model id without a litellm provider prefix."""
+    for prefix in PROVIDER_PREFIXES:
+        if model_name.startswith(prefix):
+            return model_name[len(prefix):]
+    return model_name
+
+
 def extract_code(answer: str, language: str) -> tuple[str, str] | None:
     """(code, rule) from a final answer (the text after </think>):
       language_block -- the last non-empty block tagged with the task's language,
@@ -179,19 +190,9 @@ class SimpleCodeAgent(BaseAgent):
             or "Qwen/Qwen3.5-9B"
         )
 
-        # Harbor model names may include the provider prefix:
-        #
-        #   openai/Qwen/Qwen3.5-9B
-        #
-        # vLLM expects:
-        #
-        #   Qwen/Qwen3.5-9B
-        if model_name.startswith(
-            "openai/"
-        ):
-            model_name = model_name[
-                len("openai/"):
-            ]
+        # Harbor model names may carry a litellm provider prefix (run.sh: openai/...,
+        # run.sbatch: litellm_proxy/...); vLLM serves the bare repo, Qwen/Qwen3.5-9B.
+        model_name = bare_model_name(model_name)
 
         # No client-side retries: a request past the sampling file's timeout ends as
         # APITimeoutError (re-run on resume) instead of being re-sent until Harbor's

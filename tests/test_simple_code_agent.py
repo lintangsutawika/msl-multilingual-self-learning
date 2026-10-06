@@ -10,7 +10,7 @@ from unittest import mock
 
 from msl_multilingual_self_learning.agents import simple_code_agent
 from msl_multilingual_self_learning.agents.simple_code_agent import (
-    DEFAULT_CONFIG, EmptySolutionError, ResponseTruncatedError, SimpleCodeAgent, extract_code)
+    DEFAULT_CONFIG, EmptySolutionError, ResponseTruncatedError, SimpleCodeAgent, bare_model_name, extract_code)
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = REPO / "src" / "benchmarks" / "leetcode"
@@ -84,6 +84,13 @@ class PromptTests(unittest.TestCase):
         mini_swe_config = pathlib.Path(DEFAULT_CONFIG).with_name("leetcode.yaml")
         with self.assertRaisesRegex(ValueError, "not a SimpleCodeAgent config"):
             agent(str(mini_swe_config))
+
+
+class ModelNameTests(unittest.TestCase):
+    def test_provider_prefixes_are_dropped_but_the_repo_is_kept(self):
+        for name in ("openai/Qwen/Qwen3.5-9B", "litellm_proxy/Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-9B"):
+            with self.subTest(name=name):
+                self.assertEqual(bare_model_name(name), "Qwen/Qwen3.5-9B")
 
 
 class ExtractCodeTests(unittest.TestCase):

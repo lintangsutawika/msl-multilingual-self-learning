@@ -80,7 +80,11 @@ CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode.yaml}"
 # (dataset slug = its dir name) + MODEL (bare, / -> --). Set JOB_NAME to override.
 RUN="${RUN:-0}"
 _DATASET_SLUG="$(basename "${TASK_PATH%/}")"
-JOB_NAME="${JOB_NAME:-${_DATASET_SLUG}_${_MODEL_BARE//\//--}-run-${RUN}}"
+# SimpleCodeAgent jobs carry the agent in their name, so they never resume a
+# mini-swe-agent job on the same tasks and model (whose name is unchanged).
+_AGENT_SLUG=""
+[[ "${AGENT:-}" == *simple_code_agent* ]] && _AGENT_SLUG="simple-code-agent_"
+JOB_NAME="${JOB_NAME:-${_DATASET_SLUG}_${_AGENT_SLUG}${_MODEL_BARE//\//--}-run-${RUN}}"
 JOBS_DIR="${JOBS_DIR:-jobs}"
 N_CONCURRENT="${N_CONCURRENT:-1}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -121,6 +125,9 @@ if [ "${RESUME}" = "1" ] || { [ "${RESUME}" = "auto" ] && [ -f "${JOB_DIR}/confi
     echo "RESUME  job=${JOB_NAME}  dir=${JOB_DIR}"
     echo "harbor: ${HARBOR_CMD[0]}"
     echo "retry-error-types=${RESUME_FILTER_ERRORS:-<harbor default: CancelledError>}"
+    # Harbor saves a resumed trial's secrets as "[REDACTED]" but plans with "****", so
+    # the next resume would refuse the job; restore the planned value first.
+    python3 scripts/eval/fix_redacted_key.py "${JOB_DIR}"
     echo "+ ${HARBOR_CMD[*]} ${RESUME_ARGS[*]}"
     exec "${HARBOR_CMD[@]}" "${RESUME_ARGS[@]}"
 fi
