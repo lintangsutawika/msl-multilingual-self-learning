@@ -406,16 +406,12 @@ def generate(
     # Pre-fill the solution stub: the entrypoint is already declared there, so the
     # agent just edits the body instead of guessing the signature/package/class.
     _fill(task / "solution" / source_file, **fills)
-    # Also stage the stub under environment/files/adapters/ (next to the runner):
-    # that dir is what actually reaches the container's /workspace (the runner
-    # worker.py lives at /workspace/worker.py), so the pre-declared entrypoint
-    # lands at /workspace/<source_file> for the agent to edit, on both Singularity
-    # and Modal (they both inject the task's environment/files/adapters).
-    _adapters = task / "environment" / "files" / "adapters"
-    _adapters.mkdir(parents=True, exist_ok=True)
-    (_adapters / source_file).write_text(
-        (task / "solution" / source_file).read_text()
-    )
+    # NOTE: no solution stub is staged into environment/files/adapters — the
+    # runner already declares the Solution/struct, and the pre-declared entrypoint
+    # is delivered to the agent via the instruction prompt ({stub}). Staging it
+    # here duplicates the type (e.g. two `struct Solution` / package collision) ->
+    # E0428 / "found packages solution and main" compile errors.
+    
     # The interface/entrypoint contract as JSON (tests/interface.json), consumed
     # by the verifier: {language, code(of the declared stub), callable, container}.
     _stub_src = (task / "solution" / source_file).read_text()
