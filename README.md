@@ -1,32 +1,55 @@
 # msl-multilingual-self-learning
 
-Multilingual self-learning experiments. This scaffold evaluates
-[mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent) on **SWE-bench
-Multilingual** (300 tasks across many languages) using
-[harbor](https://github.com/harbor-framework/harbor).
+LeetCode benchmark with 9 languages (python, cpp, go, java, rust, javascript,
+typescript, php, ruby), flattening one task per (problem, language). Prep builds a
+hosted HF dataset (`neulab/leetcode`); generation renders Harbor tasks from a
+per-language template.
 
 ## Setup
 
+### Serve a model (vLLM) for evaluation
+
+Build/point a CUDA vLLM Singularity image, then serve the deliberator model:
+
 ```bash
-uv sync
+# SIF already exists (e.g. north-vllm-cuda-fixed.sif). Serve a model to evaluate.
+VLLM_CUDA_SIF=/path/to/vllm-cuda.sif MODEL=Qwen/Qwen3.6-35B-A3B \
+TASKS=benchmarks/leetcode/tasks-test RUN=0 \
+  sbatch run.sbatch
 ```
 
-Installs harbor (pinned), mini-swe-agent, and `harbor-singularity-hpc` (the
-writable-rootfs Singularity environment for running task containers on a PBS/SLURM
-node). See `pyproject.toml` `[tool.uv.sources]` for the git pins.
+### Prebuild per-language SIFs for HPCs (Modal parity)
+
+Each language template carries a proper `environment/Dockerfile`. Two ways to serve
+tasks from a prebuilt image instead of building at runtime:
+
+```bash
+# Option A: build SIFs from the templates during generation (per-language).
+uv run python -m src.benchmarks.leetcode --set test \
+    --prebuild-sif \
+    --output-dir benchmarks/leetcode/tasks-test
+
+# Option B: point at already-built SIFs in a directory (named leetcode-<lang>.sif).
+uv run python -m src.benchmarks.leetcode --set test \
+    --image-dir /path/to/sifs \
+    --output-dir benchmarks/leetcode/tasks-test
+```
+
+`--prebuild-sif` builds each language SIF from its template Dockerfile and saves it
+**in the task output dir** (same place as the tasks; `--prebuild-dir` overrides).
+`task.toml [environment].docker_image` is set to the SIF's absolute path.
 
 ## Run
 
-Point the agent at any model endpoint and launch:
-
 ```bash
-# Against an OpenAI-compatible server (e.g. a local vLLM):
-MODEL=openai/Qwen/Qwen3-Coder-30B-A3B-Instruct \
-MODEL_BASE_URL=http://localhost:8000/v1 MODEL_API_KEY=dummy \
-scripts/eval/run.sh
-
-# Or a native provider (set that provider's key in your env):
-MODEL=anthropic/claude-sonnet-4-5 ANTHROPIC_API_KEY=... scripts/eval/run.sh
+VLLM_CUDA_SIF=/path/to/image.sif \
+N_CONCURRENT=16 \
+MAX_MODEL_LEN=262144 \
+TASKS=benchmarks/leetcode/tasks-test \
+MODEL=Qwen/Qwen3.6-35B-A3B \
+DATA_PARALLEL=4 TENSOR_PARALLEL=2 \
+RUN=0 \
+  sbatch run.sbatch
 ```
 
 Smoke-test on a handful of tasks first:
@@ -216,34 +239,3 @@ cd ../neulab-leetcode && git add -A && git commit -m "Rebuild" && git push
 `reports/dropped.md` in the dataset lists every dropped problem and test.
 Test split: 191 of 228 problems kept, with 18,070 tests (1,846 dropped).
 Train: 2,061 of 2,641 problems kept, with 189,802 tests.
-
-## Knobs (env vars)
-
-| Var                     | Default                 | Meaning                                                                   |
-| ----------------------- | ----------------------- | ------------------------------------------------------------------------- |
-| `MODEL`                 | *(required)*            | litellm model id, e.g. `openai/<served-name>` or `anthropic/claude-...`.  |
-| `MODEL_BASE_URL`        | —                       | OpenAI-compatible base URL (vLLM). Omit for a native provider.            |
-| `MODEL_API_KEY`         | `dummy`                 | Key for that server/provider.                                             |
-| `ENV`                   | `singularity` (on-node, via harbor-singularity-hpc), `docker`, or `modal`. |
-| `N_CONCURRENT`          | `4`                     | Parallel trials.                                                          |
-| `N_TASKS`               | *(all 300)*             | Subset size for smoke tests (`-l`).                                       |
-| `DATASET`               | `swebench_multilingual` | Harbor dataset id (resolves against the default hub registry).            |
-| `JOBS_DIR`              | `jobs`                  | Output directory.                                                         |
-| `SINGULARITY_NO_MOUNT`  | `home,tmp`              | Keep `bind-paths` so the container has DNS (needed for in-container pip). |
-| `SINGULARITY_CACHE_DIR` | *(node-local)*          | Set a shared-FS path to persist the .sif cache across jobs/resume chunks. |
-
-## Notes
-
-* **Environments.** SWE-bench Multilingual tasks are Dockerfile-defined
-  (`FROM swebench/sweb.eval.x86_64.<instance>`) with no `docker_image` in
-  `task.toml`. `ENV=singularity` handles that via `harbor-singularity-hpc`
-  (Dockerfile `FROM` fallback + writable sandbox for FUSE-restricted nodes);
-  `ENV=docker`/`modal` build the Dockerfile natively.
-* **Model server.** This scaffold does not serve a model — point
-  `MODEL_BASE_URL` at your own endpoint. If you serve a tool-calling model with
-  vLLM, set the matching `--tool-call-parser` on the server side (a serve
-  concern, not harbor).
-* **Resume.** Re-running the same `JOB_NAME` into the same `JOBS_DIR` resumes;
-  harbor stores the environment `import_path` in the job config, so a resumed
-  chunk reloads the same Singularity class (the package must be installed on
-  that node).

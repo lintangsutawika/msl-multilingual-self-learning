@@ -55,6 +55,85 @@ ADAPTERS = {
 PKG = Path(__file__).parent
 
 
+def _source_contract(interface: dict, language: str) -> str:
+    """A consistent, per-language statement of the exact entrypoint shape the
+    grader's runner invokes, derived from the `interface` field.
+
+    Consistent across tasks within each language, so the model always knows the
+    required symbol/package/class instead of guessing (`package main`, `candidate`,
+    a `main` func, etc.) and failing the compile/entrypoint check.
+    """
+    cont = (interface.get("container") or "").strip()
+    call = (interface.get("callable") or "").strip()
+    if language == "go":
+        return (
+            f"Declare the function `func {call}(...)` inside `package solution` "
+            f"(NOT `package main`, and do not define `func main` -- the grader "
+            f"runs its own driver)."
+        )
+    if language == "rust":
+        return (
+            f"Declare `struct {cont or 'Solution'}` and implement "
+            f"`impl {cont or 'Solution'} {{ fn {call}(...) -> ... }}` "
+            f"(the runner invokes `{cont or 'Solution'}::{call}(...)`)."
+        )
+    if cont:
+        return (
+            f"Declare a class/type `{cont}` exposing a method/function named "
+            f"`{call}` (the runner invokes it as `{cont}.{call}(...)` or "
+            f"`{cont}().{call}(...)`)."
+        )
+    if language == "javascript" or language == "typescript":
+        return (
+            f"Declare the function `{call}` (the runner invokes `{call}(...)`)."
+        )
+    if language == "ruby":
+        return (
+            f"Declare the method `def {call}(...)` (the runner invokes `{call}(...)`)."
+        )
+    # fallback: python / anything with no container
+    return (
+        f"Declare the entrypoint `{call}` exactly as given (match the signature "
+        f"and parameter names)."
+    )
+
+
+def _extract_public_cases(canonical_tests: dict) -> str:
+    """Extract the public/example test cases from the canonical Python judge source.
+
+    The neulab/leetcode dataset stores the public cases as ``assert candidate(...)``
+    lines in ``canonical_tests.source`` (the same check() oracle used for grading),
+    so surfacing them in the agent's instructions gives concrete input->expected
+    examples. Returns a single formatted block (empty if none found).
+    """
+    source = (canonical_tests or {}).get("source") or ""
+    lines = [
+        line.strip()
+        for line in source.splitlines()
+        if line.strip().startswith("assert candidate(")
+    ]
+    if not lines:
+        return ""
+    # Bound the inlined cases so the agent's --task argv stays well under the OS
+    # per-argument exec limit (Linux MAX_ARG_STRLEN = 128 KB): a handful of cases
+    # with huge inputs (e.g. 10k-element arrays) can exceed it and fail the sandbox
+    # exec with "OSError: [Errno 7] Argument list too long". Keep the full set on
+    # disk (tests/canonical_test.py) and inline a bounded prefix + pointer.
+    max_bytes = 96 * 1024  # safely under the 128 KB single-argument limit
+    block = []
+    used = 0
+    for line in lines:
+        if used + len(line) > max_bytes and block:
+            break
+        block.append(line)
+        used += len(line) + 1
+    out = "\n".join(block)
+    omitted = len(lines) - len(block)
+    if omitted:
+        out += f"\n# ...and {omitted} more public cases in tests/canonical_test.py"
+    return out
+
+
 def _fill(path: Path, **kw: str) -> None:
     text = path.read_text()
     for k, v in kw.items():
@@ -160,15 +239,27 @@ def dockerfile_to_def(dockerfile: Path) -> str | None:
     return "\n".join(block) + "\n"
 
 
-def prebuild_sif(dockerfile: Path, out_sif: Path, *, container_bin: str = "singularity") -> Path:
+def prebuild_sif(
+    dockerfile: Path,
+    out_sif: Path,
+    *,
+    container_bin: str = "singularity",
+    force: bool = False,
+) -> Path:
     """Build a Singularity sif from a task Dockerfile (FROM + RUN/COPY/ENV deps).
 
     Writes a .def alongside out_sif, runs ``singularity build --fakeroot`` with the
     Dockerfile's dir as the build context (so COPY sources resolve), and returns
     out_sif. Raises CalledProcessError on a failed build.
+
+    Idempotent: if ``out_sif`` already exists and ``force`` is False, the build is
+    skipped and the existing sif is returned. Pass ``force=True`` to rebuild.
     """
     dockerfile = Path(dockerfile).resolve()
     out_sif = Path(out_sif).resolve()
+    if out_sif.is_file() and not force:
+        print(f"[prebuild] {out_sif.name} exists; skipping (--prebuild-force to rebuild)")
+        return out_sif
     out_sif.parent.mkdir(parents=True, exist_ok=True)
     base = dockerfile_to_def(dockerfile)
     # Base image = the Dockerfile's FROM (last non-comment FROM line).
@@ -209,11 +300,13 @@ def prebuild_language_sifs(
     *,
     template_dir: Path | None = None,
     container_bin: str = "singularity",
+    force: bool = False,
 ) -> dict[str, str]:
     """Build one sif per language from its template Dockerfile, into out_dir.
 
     Returns a dict {language: <sif path>} suitable for adapter.generate_all's
-    images arg (which becomes task.toml [environment].docker_image)."""
+    images arg (which becomes task.toml [environment].docker_image). Skips any
+    language whose sif already exists unless ``force`` is True (rebuild)."""
     template_dir = template_dir or PKG
     images: dict[str, str] = {}
     for lang in languages:
@@ -221,9 +314,8 @@ def prebuild_language_sifs(
         if not dockerfile.exists():
             raise FileNotFoundError(f"No template Dockerfile for {lang}: {dockerfile}")
         sif = Path(out_dir) / f"{lang}.sif"
-        prebuild_sif(dockerfile, sif, container_bin=container_bin)
+        prebuild_sif(dockerfile, sif, container_bin=container_bin, force=force)
         images[lang] = str(sif)
-        print(f"prebuilt {sif}")
     return images
 
 def generate(
@@ -242,7 +334,15 @@ def generate(
 
     names = canonical_names(row)
     if len(names) != len(interface["parameters"]):
-        raise ValueError("Canonical/native parameter counts differ")
+        # A canonical/native parameter-count mismatch marks an unsupported
+        # object-transport interface (e.g. Java TreeNode/ListNode methods parse
+        # to empty params, or Rust tree methods expose a single Self root while
+        # the canonical signature has more). Treat it as unsupported so
+        # --skip-unsupported records it in exclusions.json instead of aborting.
+        raise NotImplementedError(
+            "Object transport is not supported yet "
+            "(canonical/native parameter counts differ)"
+        )
 
     task = output / f"{row['question_id']}-{language}"
     if task.exists():
@@ -284,9 +384,49 @@ def generate(
         "container": container,
         "problem": row["problem_description"].strip(),
         "source_file": source_file,
+        "public_cases": _extract_public_cases(row.get("canonical_tests")),
+        "source_contract": _source_contract(interface, language),
+        "raw_signature": interface["raw_signature"].strip(),
+        "callable": interface.get("callable", ""),
+        # lang used by the stub fence in instruction.md
+        "lang": language,
+        # The pre-declared stub source, shown in the instruction so the agent sees
+        # the exact entrypoint despite /workspace starting empty. Pre-fill the
+        # nested {raw_signature}/{callable} placeholders: _fill does a single pass
+        # and the stub is inserted after raw_signature is already substituted.
+        "stub": (
+            (task / "solution" / source_file).read_text()
+            .replace("{raw_signature}", interface["raw_signature"].strip())
+            .replace("{callable}", interface.get("callable", ""))
+            if (task / "solution" / source_file).exists() else ""
+        ),
     }
     _fill(task / "task.toml", **fills)
     _fill(task / "instruction.md", **fills)
+    # Pre-fill the solution stub: the entrypoint is already declared there, so the
+    # agent just edits the body instead of guessing the signature/package/class.
+    _fill(task / "solution" / source_file, **fills)
+    # Also stage the stub under environment/files/adapters/ (next to the runner):
+    # that dir is what actually reaches the container's /workspace (the runner
+    # worker.py lives at /workspace/worker.py), so the pre-declared entrypoint
+    # lands at /workspace/<source_file> for the agent to edit, on both Singularity
+    # and Modal (they both inject the task's environment/files/adapters).
+    _adapters = task / "environment" / "files" / "adapters"
+    _adapters.mkdir(parents=True, exist_ok=True)
+    (_adapters / source_file).write_text(
+        (task / "solution" / source_file).read_text()
+    )
+    # The interface/entrypoint contract as JSON (tests/interface.json), consumed
+    # by the verifier: {language, code(of the declared stub), callable, container}.
+    _stub_src = (task / "solution" / source_file).read_text()
+    (task / "tests" / "interface.json").write_text(
+        json.dumps({
+            "language": language,
+            "code": _stub_src,
+            "callable": interface.get("callable", ""),
+            "container": container,
+        }, ensure_ascii=False)
+    )
 
     # Problem-specific verifier artifacts.
     (task / "tests/config.json").write_text(json.dumps({
@@ -324,10 +464,16 @@ def generate_all(
     images = images or {}
     output.parent.mkdir(parents=True, exist_ok=True)
     exclusions: list[dict[str, Any]] = []
+    try:
+        from tqdm import tqdm as _tqdm
+    except ImportError:  # tqdm not yet installed: fall back to a plain counter
+        def _tqdm(it, total=None, desc=None, unit="", **unused):  # type: ignore
+            return it
+
     with tempfile.TemporaryDirectory(dir=output.parent) as directory:
         staged = Path(directory) / "tasks"
         staged.mkdir()
-        for row in rows:
+        for row in _tqdm(rows, total=len(rows), desc="generating tasks", unit="task"):
             lang = row["language"]
             if languages is not None and lang not in languages:
                 continue

@@ -10,3 +10,6 @@ if [ "$missing" -ne 0 ]; then
 fi
 mkdir -p /opt/leetcode
 cp /staging/env_files/adapters/* /opt/leetcode/
+mkdir -p /workspace
+[ -d /solution ] && cp -r /solution/. /workspace/ 2>/dev/null || true
+

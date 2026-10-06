@@ -77,9 +77,12 @@ fi
 CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode.yaml}"
 # Deterministic JOB_NAME so a resume works across walltime chunks AND RUN=0,1,2,...
 # gives repeat (non-colliding) runs of the same data+model. Derived from TASK_PATH
-# (dataset slug = its dir name) + MODEL (bare, / -> --). Set JOB_NAME to override.
+# (dataset slug = FULL TASK_PATH, / -> --) + MODEL (bare, / -> --). Set JOB_NAME to override.
 RUN="${RUN:-0}"
-_DATASET_SLUG="$(basename "${TASK_PATH%/}")"
+_DATASET_SLUG="${TASK_PATH%/}"
+_DATASET_SLUG="${_DATASET_SLUG#./}"
+_DATASET_SLUG="${_DATASET_SLUG#/}"
+_DATASET_SLUG="${_DATASET_SLUG//\//--}"
 # SimpleCodeAgent jobs carry the agent in their name, so they never resume a
 # mini-swe-agent job on the same tasks and model (whose name is unchanged).
 _AGENT_SLUG=""
@@ -91,7 +94,7 @@ DRY_RUN="${DRY_RUN:-0}"
 AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-1.0}"
 QUIET="${QUIET:-0}"
 AGENT="${AGENT:-mini-swe-agent}"
-MAX_TOKENS="${MAX_TOKENS:-8192}"
+MAX_TOKENS="${MAX_TOKENS:-}"   # empty -> fall back to the sampling YAML max_tokens (32768)
 MEMORY_MB="${MEMORY_MB:-}"
 MEMORY_ENFORCEMENT="${MEMORY_ENFORCEMENT:-}"
 RESUME="${RESUME:-auto}"
