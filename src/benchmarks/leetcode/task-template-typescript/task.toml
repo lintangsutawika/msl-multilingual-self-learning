@@ -13,5 +13,6 @@ timeout_sec = 300
 [environment]
 build_timeout_sec = 900
 cpus = 1
-memory_mb = 16384
+memory_mb = 8192
+workdir = "/workspace"
 docker_image = "{docker_image}"

@@ -48,6 +48,9 @@ def _load_source(language):
     if not code:
         raise ValueError(f"source empty: {src}")
     target.write_text(json.dumps({"language": language, "code": code}))
+    artifacts = Path(os.environ.get("LEETCODE_ARTIFACTS", "/logs/artifacts"))
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / FILES[language]).write_text(code)
     return code
 
 

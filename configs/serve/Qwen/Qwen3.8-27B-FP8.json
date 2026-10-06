@@ -4,7 +4,7 @@
   "extra_args": [
     "--enable-chunked-prefill",
     "--max-num-batched-tokens",
-    "4096",
+    "32768",
     "--enable-prefix-caching",
     "--long-prefill-token-threshold",
     "0",
@@ -12,7 +12,9 @@
     "--enable-auto-tool-choice",
     "--language-model-only",
     "--tool-call-parser",
-    "qwen3_coder"
+    "qwen3_coder",
+    "--speculative-config",
+    "{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}"
   ],
   "spec_config": null,
   "max_model_len": 262144,
