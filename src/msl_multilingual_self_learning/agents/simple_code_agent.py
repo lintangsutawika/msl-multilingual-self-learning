@@ -12,6 +12,8 @@ from openai import AsyncOpenAI
 
 # Prompts for LeetCode tasks; run.sh passes another file with --ak config_file=...
 DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "task" / "leetcode-simple-code-agent.yaml"
+# model.model_kwargs keys of a configs/sampling/<repo>.yaml that SimpleCodeAgent understands.
+SAMPLING_KEYS = {"max_tokens", "temperature", "top_p", "extra_body", "timeout", "drop_params"}
 
 
 # mini-swe-agent's command for ending a task (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`);
@@ -23,8 +25,29 @@ SUBMIT_MARKER = re.compile(
 
 
 class SimpleCodeAgent(BaseAgent):
-    def __init__(self, *args, config_file: str | None = None, **kwargs):
+    def __init__(self, *args, config_file: str | None = None, sampling_file: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
+        self._load_config(config_file)
+        self._load_sampling(sampling_file)
+
+    def _load_sampling(self, sampling_file: str | None) -> None:
+        """Request settings from the model's sampling yaml (configs/sampling/<repo>.yaml),
+        the file mini-swe-agent gets: model.model_kwargs, sent the way its client sends them."""
+        if not sampling_file:
+            raise ValueError("SimpleCodeAgent needs --ak sampling_file=configs/sampling/<repo>.yaml")
+        path = Path(sampling_file)
+        kwargs = dict(((yaml.safe_load(path.read_text()) or {}).get("model") or {}).get("model_kwargs") or {})
+        unknown = set(kwargs) - SAMPLING_KEYS
+        if unknown:
+            raise ValueError(f"{path}: model.model_kwargs has settings SimpleCodeAgent does not send: {sorted(unknown)}")
+        if "max_tokens" not in kwargs:
+            raise ValueError(f"{path}: model.model_kwargs.max_tokens is required (vLLM would allow the whole context)")
+        kwargs.pop("drop_params", None)  # a litellm option (mini-swe-agent's client); nothing to send
+        timeout = kwargs.pop("timeout", None)
+        self._client_kwargs = {"timeout": float(timeout)} if timeout is not None else {}
+        self._request_kwargs = kwargs
+
+    def _load_config(self, config_file: str | None) -> None:
         path = Path(config_file) if config_file else DEFAULT_CONFIG
         agent = (yaml.safe_load(path.read_text()) or {}).get("agent") or {}
         missing = [k for k in ("system_template", "instance_template", "drop_task_from") if not agent.get(k)]
@@ -154,29 +177,7 @@ class SimpleCodeAgent(BaseAgent):
                 len("openai/"):
             ]
 
-        # Per-request timeout in seconds (REQUEST_TIMEOUT); unset keeps the client's 600 s.
-        request_timeout = self._get_env("REQUEST_TIMEOUT")
-        client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=base_url,
-            **({"timeout": float(request_timeout)} if request_timeout else {}),
-        )
-
-        max_tokens = int(
-            self._get_env("MAX_TOKENS")
-            or "8192"
-        )
-
-        # Sampling: greedy with thinking off unless set. THINKING=1 TEMPERATURE=0.6
-        # TOP_P=0.95 TOP_K=20 matches the mini-swe-agent Qwen3.5 configs.
-        thinking = (self._get_env("THINKING") or "0").lower() in ("1", "true", "yes")
-        temperature = float(self._get_env("TEMPERATURE") or "0")
-        sampling = {}
-        if self._get_env("TOP_P"):
-            sampling["top_p"] = float(self._get_env("TOP_P"))
-        extra_body = {"chat_template_kwargs": {"enable_thinking": thinking}}
-        if self._get_env("TOP_K"):
-            extra_body["top_k"] = int(self._get_env("TOP_K"))
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url, **self._client_kwargs)
 
         messages = self._messages(instruction)
         # Keep the exact prompt next to the reply for review.
@@ -186,10 +187,7 @@ class SimpleCodeAgent(BaseAgent):
         response = await client.chat.completions.create(
             model=model_name,
             messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            extra_body=extra_body,
-            **sampling,
+            **self._request_kwargs,
         )
         await client.close()
         if response.choices[0].finish_reason == "length":

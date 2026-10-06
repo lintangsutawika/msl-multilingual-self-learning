@@ -6,12 +6,45 @@ import unittest
 
 from msl_multilingual_self_learning.agents.simple_code_agent import DEFAULT_CONFIG, SimpleCodeAgent
 
-TEMPLATES = pathlib.Path(__file__).resolve().parents[1] / "src" / "benchmarks" / "leetcode"
+REPO = pathlib.Path(__file__).resolve().parents[1]
+TEMPLATES = REPO / "src" / "benchmarks" / "leetcode"
 LANGUAGES = ["cpp", "go", "java", "javascript", "php", "python", "ruby", "rust", "typescript"]
+QWEN_9B = REPO / "configs" / "sampling" / "Qwen" / "Qwen3.5-9B.yaml"
 
 
-def agent(config_file=None):
-    return SimpleCodeAgent(logs_dir=pathlib.Path(tempfile.mkdtemp()), config_file=config_file)
+def agent(config_file=None, sampling_file=QWEN_9B):
+    return SimpleCodeAgent(logs_dir=pathlib.Path(tempfile.mkdtemp()), config_file=config_file,
+                           sampling_file=str(sampling_file) if sampling_file else None)
+
+
+def sampling(text):
+    path = pathlib.Path(tempfile.mkdtemp()) / "sampling.yaml"
+    path.write_text(text)
+    return path
+
+
+class SamplingTests(unittest.TestCase):
+    def test_qwen_sampling_file_is_sent_like_mini_swe_agent(self):
+        a = agent()
+        self.assertEqual(a._client_kwargs, {"timeout": 1200.0})
+        self.assertEqual(a._request_kwargs, {
+            "max_tokens": 32768, "temperature": 0.6, "top_p": 0.95,
+            "extra_body": {"top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0,
+                           "chat_template_kwargs": {"enable_thinking": True}},
+        })
+
+    def test_every_sampling_file_on_main_is_accepted(self):
+        for path in sorted((REPO / "configs" / "sampling").glob("*/*.yaml")):
+            with self.subTest(path=path.name):
+                self.assertIn("max_tokens", agent(sampling_file=path)._request_kwargs)
+
+    def test_missing_or_unusable_sampling_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "needs --ak sampling_file"):
+            agent(sampling_file=None)
+        with self.assertRaisesRegex(ValueError, "does not send"):
+            agent(sampling_file=sampling("model:\n  model_kwargs:\n    max_tokens: 10\n    seed: 1\n"))
+        with self.assertRaisesRegex(ValueError, "max_tokens is required"):
+            agent(sampling_file=sampling("model:\n  model_kwargs:\n    temperature: 0.6\n"))
 
 
 def instruction(language):

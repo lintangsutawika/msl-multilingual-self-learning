@@ -20,6 +20,10 @@
 #                     per-model configs/sampling/<repo>.yaml is auto-selected by
 #                     MODEL when present, e.g. MODEL=Qwen/Qwen3.5-9B ->
 #                     configs/sampling/Qwen/Qwen3.5-9B.yaml).
+#                     With AGENT=...simple_code_agent:SimpleCodeAgent it is the agent's
+#                     prompt config instead (default configs/task/leetcode-simple-code-agent.yaml).
+#   SAMPLING_FILE    SimpleCodeAgent only: the model's sampling yaml (default
+#                     configs/sampling/<repo>.yaml, the file mini-swe-agent gets as CONFIG_FILE).
 #   JOB_NAME         harbor job name (default <dataset>_<model>-run-<RUN>; deterministic
 #                     so resume works across chunks AND RUN=0,1,... gives repeat runs).
 #   JOBS_DIR         output directory (default jobs)
@@ -57,6 +61,14 @@ MODEL_API_KEY="${MODEL_API_KEY:-dummy}"
 # so per-model sampling configs resolve by the real repo path.
 _MODEL_BARE="${MODEL#openai/}"
 _MODEL_BARE="${_MODEL_BARE#litellm_proxy/}"
+# SimpleCodeAgent takes two files: its prompts (CONFIG_FILE) and the same per-model
+# sampling yaml mini-swe-agent gets (SAMPLING_FILE). mini-swe-agent is unchanged below.
+SAMPLING_FILE="${SAMPLING_FILE:-}"
+if [[ "${AGENT:-}" == *simple_code_agent* ]]; then
+    SAMPLING_FILE="${SAMPLING_FILE:-configs/sampling/${_MODEL_BARE}.yaml}"
+    CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode-simple-code-agent.yaml}"
+    [ -f "${SAMPLING_FILE}" ] || { echo "ERROR: sampling file not found: ${SAMPLING_FILE}" >&2; exit 2; }
+fi
 # Per-model sampling config: configs/sampling/<repo>.yaml wins when present;
 # else fall back to config/leetcode.yaml. An explicit CONFIG_FILE always wins.
 if [ -z "${CONFIG_FILE:-}" ] && [ -f "configs/sampling/${_MODEL_BARE}.yaml" ]; then
@@ -130,6 +142,7 @@ ARGS=(
     --agent-timeout-multiplier "${AGENT_TIMEOUT_MULT}"
     -y
 )
+[ -n "${SAMPLING_FILE}" ] && ARGS+=( --ak "sampling_file=${SAMPLING_FILE}" )
 [ -n "${MEMORY_MB}" ] && ARGS+=( --ek "override_memory_mb=${MEMORY_MB}" )
 [ -n "${MEMORY_ENFORCEMENT}" ] && ARGS+=( --ek "memory_enforcement_policy=${MEMORY_ENFORCEMENT}" )
 [ "${QUIET}" = "1" ] && ARGS+=( --quiet )
@@ -137,6 +150,6 @@ ARGS=(
 
 echo "task:  ${TASK_PATH}"
 echo "harbor: ${HARBOR_CMD[0]}"
-echo "model: ${MODEL}  base_url: ${MODEL_BASE_URL}  config: ${CONFIG_FILE}"
+echo "model: ${MODEL}  base_url: ${MODEL_BASE_URL}  config: ${CONFIG_FILE}${SAMPLING_FILE:+  sampling: ${SAMPLING_FILE}}"
 echo "+ ${HARBOR_CMD[*]} ${ARGS[*]}"
 exec "${HARBOR_CMD[@]}" "${ARGS[@]}"
