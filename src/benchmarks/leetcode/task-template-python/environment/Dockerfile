@@ -14,7 +14,12 @@ RUN apt-get update && \
     /opt/harbor-server/bin/python3 -m pip install --no-cache-dir uvicorn fastapi && \
     rm -rf /var/lib/apt/lists/*
 
-# LeetCode's Python 3 judge provides sortedcontainers (SortedList, SortedDict).
-RUN python3 -m pip install --no-cache-dir sortedcontainers
+# LeetCode's Python 3 judge provides sortedcontainers (SortedList, SortedDict). Install it
+# for both interpreters: the image's (pip) and Debian's /usr/bin/python3, which the apt
+# packages above pull in and which Harbor's PATH (/usr/bin first) picks as `python3`.
+RUN python3 -m pip install --no-cache-dir sortedcontainers && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-sortedcontainers && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN python3 --version

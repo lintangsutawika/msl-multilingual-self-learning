@@ -101,12 +101,10 @@ one node. Instead of step 1, generation can build the images itself with
 
 ### Sets
 
-* `--set test`: the 201 problems of the LeetCodeDataset test split that
-  support all nine languages. 197 are runnable (1773 tasks): 3319 needs tree
-  transport, which is not supported yet, and 3266, 3387 and 3405 have fewer
-  than 10 valid test cases (see [Invalid test cases](#invalid-test-cases)).
-* `--set train`: the LeetCodeDataset train split problems supporting all nine
-  languages (for training; disjoint from the test set).
+* `--set test`: the 191 problems of `neulab/leetcode`'s test split, in all
+  nine languages (1,719 tasks).
+* `--set train`: its 2,103 train problems (18,927 tasks; for training, disjoint
+  from the test set).
 
 `--lang` limits which languages become tasks; `--question-id` and `--limit`
 select problems.
@@ -237,5 +235,5 @@ cd ../neulab-leetcode && git add -A && git commit -m "Rebuild" && git push
   the test split also several valid answers or text that refers to a figure.
 
 `reports/dropped.md` in the dataset lists every dropped problem and test.
-Test split: 191 of 228 problems kept, with 18,070 tests (1,846 dropped).
-Train: 2,061 of 2,641 problems kept, with 189,802 tests.
+Test split: 191 of 228 problems kept, with 18,054 tests (1,862 dropped).
+Train: 2,103 of 2,641 problems kept, with 194,592 tests.

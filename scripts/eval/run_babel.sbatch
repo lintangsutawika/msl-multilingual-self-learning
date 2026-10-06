@@ -70,7 +70,7 @@ export MEMORY_MB="${MEMORY_MB:-2048}"
 export RESUME_PASSES="${RESUME_PASSES:-2}"
 # Re-run trials that ended in an infrastructure error; never the model's own failures
 # (ResponseTruncatedError, EmptySolutionError), which would re-sample the model.
-export RESUME_FILTER_ERRORS="${RESUME_FILTER_ERRORS:-AgentTimeoutError NonZeroAgentExitCodeError RuntimeError CancelledError NetworkConnectionError HTTPStatusError APITimeoutError}"
+export RESUME_FILTER_ERRORS="${RESUME_FILTER_ERRORS:-AgentTimeoutError NonZeroAgentExitCodeError RuntimeError CancelledError NetworkConnectionError HTTPStatusError APITimeoutError EnvironmentStartTimeoutError}"
 echo "tasks=${TASKS} model=${MODEL:-} agent=${AGENT:-mini-swe-agent} port=${VLLM_PORT} n=${N_CONCURRENT} resume_passes=${RESUME_PASSES}"
 
 bash scripts/eval/run.sbatch
