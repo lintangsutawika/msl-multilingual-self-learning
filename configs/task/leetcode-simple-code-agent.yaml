@@ -1,0 +1,13 @@
+# SimpleCodeAgent on LeetCode tasks: one model call; the reply is the source file.
+# Passed to the agent as --ak config_file=configs/task/leetcode-simple-code-agent.yaml.
+# mini-swe-agent keeps using configs/task/leetcode.yaml and the task's full instruction.md.
+agent:
+  system_template: >
+    You are a coding assistant. Return only the complete source code for the
+    requested solution. Do not include Markdown fences or explanations.
+  instance_template: |
+    {{task}}
+  # instruction.md ends with mini-swe-agent's submission steps (save the file under
+  # /workspace, then run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`). SimpleCodeAgent
+  # has no shell and saves the reply itself, so the task text is cut at this line.
+  drop_task_from: "Save your final solution to /workspace/"

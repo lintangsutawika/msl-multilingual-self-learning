@@ -3,9 +3,15 @@ from __future__ import annotations
 import base64
 import json
 import re
+from pathlib import Path
 
+import yaml
 from harbor.agents.base import BaseAgent
 from openai import AsyncOpenAI
+
+
+# Prompts for LeetCode tasks; run.sh passes another file with --ak config_file=...
+DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "task" / "leetcode-simple-code-agent.yaml"
 
 
 # mini-swe-agent's command for ending a task (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`);
@@ -17,12 +23,35 @@ SUBMIT_MARKER = re.compile(
 
 
 class SimpleCodeAgent(BaseAgent):
+    def __init__(self, *args, config_file: str | None = None, **kwargs):
+        super().__init__(*args, **kwargs)
+        path = Path(config_file) if config_file else DEFAULT_CONFIG
+        agent = (yaml.safe_load(path.read_text()) or {}).get("agent") or {}
+        missing = [k for k in ("system_template", "instance_template", "drop_task_from") if not agent.get(k)]
+        if missing:
+            raise ValueError(f"{path} is not a SimpleCodeAgent config (missing agent.{', agent.'.join(missing)})")
+        if "{{task}}" not in agent["instance_template"]:
+            raise ValueError(f"{path}: agent.instance_template has no {{{{task}}}} placeholder")
+        self._config = agent
+
     @staticmethod
     def name() -> str:
         return "simple-code-agent"
 
     def version(self) -> str:
-        return "0.4.0"
+        return "0.5.0"
+
+    def _messages(self, instruction: str) -> list[dict[str, str]]:
+        """System and user messages: the task text up to agent.drop_task_from (the
+        submission steps written for mini-swe-agent), inside agent.instance_template."""
+        marker = self._config["drop_task_from"]
+        if marker not in instruction:
+            raise ValueError(f"task instruction has no {marker!r}; update agent.drop_task_from in the config")
+        task = instruction[: instruction.index(marker)].rstrip()
+        return [
+            {"role": "system", "content": self._config["system_template"].strip()},
+            {"role": "user", "content": self._config["instance_template"].replace("{{task}}", task).strip()},
+        ]
 
     async def setup(
         self,
@@ -149,23 +178,14 @@ class SimpleCodeAgent(BaseAgent):
         if self._get_env("TOP_K"):
             extra_body["top_k"] = int(self._get_env("TOP_K"))
 
+        messages = self._messages(instruction)
+        # Keep the exact prompt next to the reply for review.
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / "prompt.json").write_text(json.dumps(messages, ensure_ascii=False, indent=1), encoding="utf-8")
+
         response = await client.chat.completions.create(
             model=model_name,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a coding assistant. "
-                        "Return only the complete source code "
-                        "for the requested solution. "
-                        "Do not include Markdown fences or explanations."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": instruction,
-                },
-            ],
+            messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
             extra_body=extra_body,
