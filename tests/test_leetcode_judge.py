@@ -43,6 +43,8 @@ class JudgeTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(task / "tests/test.py")], env={**os.environ,
                 "LEETCODE_WORKSPACE": str(workspace), "LEETCODE_LOGS": str(logs),
                 "LEETCODE_ADAPTERS": str(task / "environment/files/adapters")}, capture_output=True, text=True, timeout=20)
+            failure = logs / "failure.json"
+            self.failure = json.loads(failure.read_text()) if failure.exists() else None
             return result, (logs / "status.txt").read_text().strip(), (logs / "reward.txt").read_text().strip()
 
     def test_dynamic_calls_and_native_argument_names(self):
@@ -65,6 +67,26 @@ class JudgeTests(unittest.TestCase):
     def test_worker_crash_is_not_wrong_answer(self):
         _, status, reward = self.run_judge("class Solution:\n    def solve(self, native_name): raise ValueError('crash')\n")
         self.assertEqual((status, reward), ("RUNTIME_ERROR", "0"))
+
+    def test_pass_writes_no_failure_log(self):
+        self.run_judge("class Solution:\n    def solve(self, native_name):\n        return native_name * 2\n")
+        self.assertIsNone(self.failure)
+
+    def test_wrong_answer_logs_the_test_input_and_returned_value(self):
+        code = "class Solution:\n    def solve(self, native_name):\n        return 99 if native_name == 2 else native_name * 2\n"
+        _, status, _ = self.run_judge(code)
+        self.assertEqual(status, "WRONG_ANSWER")
+        self.assertEqual(self.failure["status"], "WRONG_ANSWER")
+        self.assertEqual(self.failure["last_call"], {"number": 3, "input": "[2]", "output": "99"})
+        self.assertEqual(self.failure["test"], {"line": 3, "source": "assert candidate(hf_name=i) == i * 2"})
+
+    def test_crash_logs_the_signal(self):
+        code = "import os, signal\nclass Solution:\n    def solve(self, native_name):\n        os.kill(os.getpid(), signal.SIGSEGV)\n"
+        _, status, _ = self.run_judge(code)
+        self.assertEqual(status, "RUNTIME_ERROR")
+        self.assertEqual(self.failure["exit"], "signal SIGSEGV")
+        self.assertIn("signal SIGSEGV", self.failure["error"])
+        self.assertEqual(self.failure["last_call"], {"number": 1, "input": "[0]"})
 
 
 class NormalizeTests(unittest.TestCase):

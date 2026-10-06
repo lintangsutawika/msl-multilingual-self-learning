@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import selectors
 import shutil
+import signal
 import subprocess
 import sys
 import traceback
@@ -136,6 +137,41 @@ TSCONFIG = {
 
 class CompileError(RuntimeError):
     pass
+
+
+# What the last candidate call sent and got back, and how the candidate process ended;
+# written to failure.json when the verdict is not PASS. Logging only: verdicts do not use it.
+FAILURE = {}
+LOG_VALUE_CHARS = 2000
+
+
+def _shorten(value):
+    """A value as JSON text, cut to LOG_VALUE_CHARS for the log."""
+    try:
+        text = json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text if len(text) <= LOG_VALUE_CHARS else text[:LOG_VALUE_CHARS] + f"... ({len(text)} chars)"
+
+
+def _exit_description(returncode):
+    """'exit code 1' or 'signal SIGSEGV' for a finished process."""
+    if returncode is not None and returncode < 0:
+        try:
+            return f"signal {signal.Signals(-returncode).name}"
+        except ValueError:
+            return f"signal {-returncode}"
+    return f"exit code {returncode}"
+
+
+def _failed_test(error, source):
+    """The canonical test line (number and text) an exception was raised from, if any."""
+    frames = [f for f in traceback.extract_tb(error.__traceback__) if f.filename == "canonical_test.py"]
+    if not frames:
+        return None
+    lines = source.splitlines()
+    lineno = frames[-1].lineno
+    return {"line": lineno, "source": lines[lineno - 1].strip()[:LOG_VALUE_CHARS] if 0 < lineno <= len(lines) else None}
 
 
 def normalize(language, code, config):
@@ -296,7 +332,9 @@ def prepare(language, config, build):
         "rust": [str(build / "target" / "release" / "leetcode_runner")],
         "javascript": ["node", "runner.js"],
         "typescript": ["node", "combined.js"],
-        "php": ["php", "runner.php"],
+        # PHP prints fatal errors to stdout (the result stream) by default; send them to
+        # worker-stderr.txt instead. A fatal error still leaves no result.
+        "php": ["php", "-d", "display_errors=stderr", "runner.php"],
         "ruby": ["ruby", "runner.rb"],
     }[language]
 
@@ -331,6 +369,7 @@ def run_candidate(config, signature, build):
             nonlocal calls
             bound = signature.bind(*args, **kwargs)
             ordered = [bound.arguments[name] for name in config["parameter_names"]]
+            FAILURE["last_call"] = {"number": calls + 1, "input": _shorten(ordered)}
             process.stdin.write((json.dumps(ordered, allow_nan=False) + "\n").encode())
             process.stdin.flush()
             while b"\n" not in pending:
@@ -338,27 +377,46 @@ def run_candidate(config, signature, build):
                     raise TimeoutError("Native candidate exceeded 10 seconds per call")
                 chunk = os.read(process.stdout.fileno(), 65536)
                 if not chunk:
-                    raise RuntimeError("Candidate exited without a JSON result; see worker-stderr.txt")
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    FAILURE["exit"] = _exit_description(process.poll())
+                    raise RuntimeError(f"Candidate exited ({FAILURE['exit']}) without a JSON result; "
+                                       "see worker-stderr.txt")
                 pending.extend(chunk)
                 if len(pending) > 64 * 1024 * 1024:
                     raise RuntimeError("Candidate output exceeds 64 MiB")
             line, _, rest = pending.partition(b"\n")
             pending[:] = rest
             calls += 1
-            return json.loads(line)
+            try:
+                result = json.loads(line)
+            except ValueError:
+                FAILURE["last_call"]["raw_output"] = _shorten(line[:200].decode("utf-8", "replace"))
+                raise
+            FAILURE["last_call"]["output"] = _shorten(result)
+            return result
 
         try:
             namespace = {}
             exec("from typing import *\nfrom math import *\nfrom collections import *\nfrom functools import *\nfrom itertools import *\nimport math, collections, functools, itertools, random, string\n", namespace)
-            exec((TESTS / "canonical_test.py").read_text(), namespace)
-            namespace["check"](candidate)
+            source = (TESTS / "canonical_test.py").read_text()
+            # Compiled under its file name so a failing assert's line can be found.
+            exec(compile(source, "canonical_test.py", "exec"), namespace)
+            try:
+                namespace["check"](candidate)
+            except Exception as error:
+                FAILURE["test"] = _failed_test(error, source)
+                raise
             if not calls:
                 raise RuntimeError("Canonical test made no candidate calls")
             process.stdin.close()
             process.wait(timeout=10)
             extra = bytes(pending) + process.stdout.read()
             if process.returncode or extra.strip():
-                raise RuntimeError("Candidate failed at shutdown or emitted extra output")
+                FAILURE["exit"] = _exit_description(process.returncode)
+                raise RuntimeError(f"Candidate failed at shutdown ({FAILURE['exit']}) or emitted extra output")
             (LOGS / "details.json").write_text(json.dumps({"language": config["language"], "calls": calls}))
         finally:
             selector.close()
@@ -374,20 +432,29 @@ def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     (LOGS / "reward.txt").write_text("0\n")
     status = "RUNTIME_ERROR"
+    error = None
     try:
         verify()
         status = "PASS"
-    except CompileError:
-        status = "COMPILE_ERROR"
+    except CompileError as e:
+        status, error = "COMPILE_ERROR", e
         traceback.print_exc()
-    except AssertionError:
-        status = "WRONG_ANSWER"
+    except AssertionError as e:
+        status, error = "WRONG_ANSWER", e
         traceback.print_exc()
-    except (TimeoutError, subprocess.TimeoutExpired):
-        status = "TIMEOUT"
+    except (TimeoutError, subprocess.TimeoutExpired) as e:
+        status, error = "TIMEOUT", e
         traceback.print_exc()
-    except Exception:
+    except Exception as e:
+        error = e
         traceback.print_exc()
+    if error is not None:
+        message = str(error).strip().splitlines()
+        (LOGS / "failure.json").write_text(json.dumps({
+            "status": status,
+            "error": type(error).__name__ + (": " + message[0][:500] if message else ""),
+            **FAILURE,
+        }, indent=1))
     (LOGS / "status.txt").write_text(status + "\n")
     (LOGS / "reward.txt").write_text("1\n" if status == "PASS" else "0\n")
     print(status)
