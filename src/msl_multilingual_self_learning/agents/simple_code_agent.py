@@ -97,11 +97,18 @@ class SimpleCodeAgent(BaseAgent):
     def _load_config(self, config_file: str | None) -> None:
         path = Path(config_file) if config_file else DEFAULT_CONFIG
         agent = (yaml.safe_load(path.read_text()) or {}).get("agent") or {}
-        missing = [k for k in ("system_template", "instance_template", "drop_task_from") if not agent.get(k)]
+        required = ("system_template", "instance_template", "language_pattern", "drop_task_from")
+        missing = [k for k in required if not agent.get(k)]
         if missing:
             raise ValueError(f"{path} is not a SimpleCodeAgent config (missing agent.{', agent.'.join(missing)})")
         if "{{task}}" not in agent["instance_template"]:
             raise ValueError(f"{path}: agent.instance_template has no {{{{task}}}} placeholder")
+        if re.compile(agent["language_pattern"]).groups != 1:
+            raise ValueError(f"{path}: agent.language_pattern needs exactly one (group) for the language")
+        rules = agent.get("rewrite_task") or []
+        if any(not isinstance(r, dict) or "from" not in r or "to" not in r for r in rules):
+            raise ValueError(f"{path}: each agent.rewrite_task entry needs 'from' and 'to'")
+        self._rewrites = [(re.compile(r["from"]), r["to"]) for r in rules]
         self._config = agent
 
     @staticmethod
@@ -109,15 +116,30 @@ class SimpleCodeAgent(BaseAgent):
         return "simple-code-agent"
 
     def version(self) -> str:
-        return "0.8.0"
+        return "0.9.0"
+
+    def _language(self, instruction: str) -> str:
+        """The task's language, from agent.language_pattern (not the LANGUAGE environment
+        variable, which is also the locale setting, e.g. en_US:en)."""
+        match = re.search(self._config["language_pattern"], instruction)
+        if match is None or match.group(1) not in LANGUAGES:
+            raise ValueError("task instruction does not name one of the 9 languages via agent.language_pattern; "
+                             "update it in the config")
+        return match.group(1)
 
     def _messages(self, instruction: str) -> list[dict[str, str]]:
         """System and user messages: the task text up to agent.drop_task_from (the
-        submission steps written for mini-swe-agent), inside agent.instance_template."""
+        submission steps written for mini-swe-agent), with each agent.rewrite_task
+        applied, inside agent.instance_template."""
         marker = self._config["drop_task_from"]
         if marker not in instruction:
             raise ValueError(f"task instruction has no {marker!r}; update agent.drop_task_from in the config")
         task = instruction[: instruction.index(marker)].rstrip()
+        for pattern, replacement in self._rewrites:
+            task, n = pattern.subn(lambda _: replacement, task)
+            if not n:
+                raise ValueError(f"task instruction has no match for agent.rewrite_task {pattern.pattern!r}; "
+                                 "update it in the config")
         return [
             {"role": "system", "content": self._config["system_template"].strip()},
             {"role": "user", "content": self._config["instance_template"].replace("{{task}}", task).strip()},
@@ -174,12 +196,7 @@ class SimpleCodeAgent(BaseAgent):
         environment,
         context,
     ) -> None:
-        # The task's language comes from its "Language:" line only (not the LANGUAGE
-        # environment variable, which is also the locale setting, e.g. en_US:en).
-        match = re.match(r"Language: (\w+)\n", instruction)
-        if match is None or match.group(1) not in LANGUAGES:
-            raise ValueError("Task instruction must start with 'Language: <one of the 9 languages>'")
-        language = match.group(1)
+        language = self._language(instruction)
 
         base_url = (
             self._get_env(

@@ -56,8 +56,10 @@ class SamplingTests(unittest.TestCase):
 def instruction(language):
     """The language's instruction.md template filled the way the task builder fills it."""
     text = (TEMPLATES / f"task-template-{language}" / "instruction.md").read_text()
-    fills = {"language": language, "entrypoint": "int f(int x) {", "container": "Solution",
-             "problem": "Return x.", "source_file": f"solution.{language}", "callable": "f"}
+    fills = {"language": language, "lang": language, "entrypoint": "int f(int x) {", "container": "Solution",
+             "problem": "Return x.", "source_file": f"solution.{language}", "callable": "f",
+             "raw_signature": "int f(int x) {", "stub": "class Solution { int f(int x) { } }",
+             "public_cases": "", "source_contract": ""}
     for key, value in fills.items():
         text = text.replace("{" + key + "}", value)
     return text
@@ -70,15 +72,29 @@ class PromptTests(unittest.TestCase):
                 system, user = agent()._messages(instruction(language))
                 self.assertEqual(system["role"], "system")
                 self.assertTrue(system["content"].startswith("You are a coding assistant."))
-                self.assertTrue(user["content"].startswith(f"Language: {language}\n"))
-                self.assertIn("Problem:\nReturn x.", user["content"])
-                self.assertTrue(user["content"].endswith("Do not include unused\nimports."))
+                self.assertTrue(user["content"].startswith(
+                    f"Solve the following problem in the {language} programming language.\n\nReturn x."))
+                self.assertIn("Implement the solution using the following as entrypoint:\n\n"
+                              f"```{language}\nclass Solution {{ int f(int x) {{ }} }}\n```", user["content"])
+                self.assertTrue(user["content"].endswith("do not add\nthird-party or external libraries."))
                 for dropped in ("/workspace", "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT", "issue the command"):
                     self.assertNotIn(dropped, user["content"])
+                self.assertEqual(agent()._language(instruction(language)), language)
 
     def test_instruction_without_the_marker_is_refused(self):
         with self.assertRaisesRegex(ValueError, "drop_task_from"):
-            agent()._messages("Language: python\nProblem:\nReturn x.\n")
+            agent()._messages("Solve the following problem in the python programming language.\n\nReturn x.\n")
+
+    def test_instruction_without_the_workspace_line_is_refused(self):
+        text = instruction("python").replace("Implement the solution in `/workspace/solution.python` using",
+                                             "Write the solution using")
+        with self.assertRaisesRegex(ValueError, "rewrite_task"):
+            agent()._messages(text)
+
+    def test_instruction_without_a_known_language_is_refused(self):
+        for text in ("Language: python\nReturn x.", "Solve the following problem in the cobol programming language."):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "language_pattern"):
+                agent()._language(text)
 
     def test_config_without_simple_code_agent_keys_is_refused(self):
         mini_swe_config = pathlib.Path(DEFAULT_CONFIG).with_name("leetcode.yaml")

@@ -1,13 +1,22 @@
 # SimpleCodeAgent on LeetCode tasks: one model call; the reply is the source file.
 # Passed to the agent as --ak config_file=configs/task/leetcode-simple-code-agent.yaml.
 # mini-swe-agent keeps using configs/task/leetcode.yaml and the task's full instruction.md.
+#
+# The task text is the task's instruction.md, adapted below for an agent that has no
+# shell and saves the reply itself. Every pattern must match, or the agent refuses the
+# task (so a change to instruction.md shows up as an error, not as a wrong prompt).
 agent:
   system_template: >
     You are a coding assistant. Return the complete solution as a single Markdown
     code block in the requested language. Do not include explanations or examples.
   instance_template: |
     {{task}}
-  # instruction.md ends with mini-swe-agent's submission steps (save the file under
-  # /workspace, then run `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`). SimpleCodeAgent
-  # has no shell and saves the reply itself, so the task text is cut at this line.
-  drop_task_from: "Save your final solution to /workspace/"
+  # The task's language, from the instruction's first sentence.
+  language_pattern: "Solve the following problem in the (\\w+) programming language"
+  # mini-swe-agent's submission step (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`):
+  # the task text is cut at this line.
+  drop_task_from: "When the file is written and you are done"
+  # mini-swe-agent's file location, rewritten for a reply-only agent (regex -> text).
+  rewrite_task:
+    - from: "Implement the solution in `/workspace/[^`]+` using"
+      to: "Implement the solution using"
