@@ -16,6 +16,21 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "task" / "lee
 SAMPLING_KEYS = {"max_tokens", "temperature", "top_p", "extra_body", "timeout", "drop_params"}
 
 
+LANGUAGES = {"python", "cpp", "go", "java", "rust", "javascript", "typescript", "php", "ruby"}
+# A closed fenced block: an opening ``` (optional language tag), the code, a closing ```.
+FENCED_BLOCK = re.compile(r"```(?:[A-Za-z0-9_+#.\-]+)?\s*\n(.*?)```", flags=re.DOTALL)
+
+
+# The model's own failures, under their own names so a resume filter on RuntimeError
+# (crashes) does not re-sample them: Harbor matches the exception's class name exactly.
+class ResponseTruncatedError(Exception):
+    """The reply hit max_tokens with no complete code block in its final answer."""
+
+
+class EmptySolutionError(Exception):
+    """The reply held no source code."""
+
+
 # mini-swe-agent's command for ending a task (`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`);
 # models trained on its trajectories sometimes append it to a plain code answer.
 SUBMIT_MARKER = re.compile(
@@ -62,7 +77,7 @@ class SimpleCodeAgent(BaseAgent):
         return "simple-code-agent"
 
     def version(self) -> str:
-        return "0.5.0"
+        return "0.6.0"
 
     def _messages(self, instruction: str) -> list[dict[str, str]]:
         """System and user messages: the task text up to agent.drop_task_from (the
@@ -105,20 +120,27 @@ class SimpleCodeAgent(BaseAgent):
 
         # Prefer the final fenced code block when one is present (skipping
         # blocks left empty, e.g. one that only held the marker).
-        fenced_blocks = [
-            block
-            for block in re.findall(
-                r"```(?:[A-Za-z0-9_+#.\-]+)?\s*\n(.*?)```",
-                text,
-                flags=re.DOTALL,
-            )
-            if block.strip()
-        ]
+        fenced_blocks = [block for block in FENCED_BLOCK.findall(text) if block.strip()]
 
         if fenced_blocks:
             return fenced_blocks[-1].strip()
 
         return text
+
+    def _thinking(self) -> bool:
+        kwargs = (self._request_kwargs.get("extra_body") or {}).get("chat_template_kwargs") or {}
+        return bool(kwargs.get("enable_thinking"))
+
+    def _code_from_cut_off_reply(self, content: str) -> str:
+        """Code from a reply that hit max_tokens: only a complete (closed) code block in the
+        final answer counts. Cut off while still thinking (no </think> yet), any code is a
+        draft; cut off inside an open block, the code is unfinished."""
+        if self._thinking() and "</think>" not in content:
+            raise ResponseTruncatedError("Reply hit max_tokens while still thinking")
+        answer = content.rsplit("</think>", 1)[-1]
+        if not any(block.strip() for block in FENCED_BLOCK.findall(SUBMIT_MARKER.sub("", answer))):
+            raise ResponseTruncatedError("Reply hit max_tokens with no complete code block")
+        return self._strip_markdown_fences(answer)
 
     async def run(
         self,
@@ -126,20 +148,12 @@ class SimpleCodeAgent(BaseAgent):
         environment,
         context,
     ) -> None:
-        # Harbor --ae values are passed through BaseAgent.extra_env,
-        # so use _get_env() rather than os.environ directly.
-        language = self._get_env(
-            "LANGUAGE"
-        )
-
-        match = re.match(r"Language: (python|cpp|go|java|rust|javascript|typescript|php|ruby)\n", instruction)
-        if match is not None:
-            task_language = match.group(1)
-            if language is not None and language != task_language:
-                raise ValueError("LANGUAGE does not match the task prompt")
-            language = task_language
-        if language not in {"python", "cpp", "go", "java", "rust", "javascript", "typescript", "php", "ruby"}:
-            raise ValueError("Task must specify a supported language")
+        # The task's language comes from its "Language:" line only (not the LANGUAGE
+        # environment variable, which is also the locale setting, e.g. en_US:en).
+        match = re.match(r"Language: (\w+)\n", instruction)
+        if match is None or match.group(1) not in LANGUAGES:
+            raise ValueError("Task instruction must start with 'Language: <one of the 9 languages>'")
+        language = match.group(1)
 
         base_url = (
             self._get_env(
@@ -177,7 +191,10 @@ class SimpleCodeAgent(BaseAgent):
                 len("openai/"):
             ]
 
-        client = AsyncOpenAI(api_key=api_key, base_url=base_url, **self._client_kwargs)
+        # No client-side retries: a request past the sampling file's timeout ends as
+        # APITimeoutError (re-run on resume) instead of being re-sent until Harbor's
+        # agent timeout kills the trial.
+        client = AsyncOpenAI(api_key=api_key, base_url=base_url, max_retries=0, **self._client_kwargs)
 
         messages = self._messages(instruction)
         # Keep the exact prompt next to the reply for review.
@@ -190,33 +207,24 @@ class SimpleCodeAgent(BaseAgent):
             **self._request_kwargs,
         )
         await client.close()
-        if response.choices[0].finish_reason == "length":
-            raise RuntimeError("Model response was truncated before completion")
+        choice = response.choices[0]
+        content = choice.message.content or ""
 
-        content = (
-            response
-            .choices[0]
-            .message
-            .content
-        )
-
-        if content is None:
-            raise RuntimeError(
-                "Model returned no content"
-            )
-
-        # Keep the raw reply next to solution.json for review (what extraction removed).
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        # Keep the raw reply (cut off or not) and its length next to solution.json for review.
         (self.logs_dir / "response.txt").write_text(content, encoding="utf-8")
+        usage = response.usage
+        (self.logs_dir / "usage.json").write_text(json.dumps({
+            "finish_reason": choice.finish_reason,
+            "prompt_tokens": usage.prompt_tokens if usage else None,
+            "completion_tokens": usage.completion_tokens if usage else None,
+        }), encoding="utf-8")
 
-        code = self._strip_markdown_fences(
-            content
-        )
-
+        if choice.finish_reason == "length":
+            code = self._code_from_cut_off_reply(content)
+        else:
+            code = self._strip_markdown_fences(content)
         if not code:
-            raise RuntimeError(
-                "Model returned empty source code"
-            )
+            raise EmptySolutionError("Model returned no source code")
 
         solution = {
             "language": language,

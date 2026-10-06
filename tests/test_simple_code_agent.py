@@ -1,10 +1,16 @@
 """SimpleCodeAgent's prompt (from its config) and code extraction from a model reply."""
+import asyncio
+import json
+import os
 import pathlib
 import tempfile
 import types
 import unittest
+from unittest import mock
 
-from msl_multilingual_self_learning.agents.simple_code_agent import DEFAULT_CONFIG, SimpleCodeAgent
+from msl_multilingual_self_learning.agents import simple_code_agent
+from msl_multilingual_self_learning.agents.simple_code_agent import (
+    DEFAULT_CONFIG, EmptySolutionError, ResponseTruncatedError, SimpleCodeAgent)
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 TEMPLATES = REPO / "src" / "benchmarks" / "leetcode"
@@ -100,6 +106,97 @@ class ExtractCodeTests(unittest.TestCase):
     def test_marker_text_inside_code_is_kept(self):
         code = "def f():\n    print('echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT')"
         self.assertEqual(extract(f"```python\n{code}\n```"), code)
+
+
+THINKING_OFF = "model:\n  model_kwargs:\n    max_tokens: 100\n    extra_body:\n      chat_template_kwargs:\n        enable_thinking: false\n"
+
+
+class CutOffReplyTests(unittest.TestCase):
+    """A reply that hit max_tokens is graded only if its final answer has a closed code block."""
+
+    def test_cut_off_while_thinking_is_not_graded(self):
+        with self.assertRaisesRegex(ResponseTruncatedError, "still thinking"):
+            agent()._code_from_cut_off_reply("plan... ```python\ndef f(): pass\n``` more planning")
+
+    def test_closed_block_after_thinking_is_graded(self):
+        reply = "plan</think>\n```python\ndef f():\n    return 1\n```\nThis runs in O(1) because"
+        self.assertEqual(agent()._code_from_cut_off_reply(reply), "def f():\n    return 1")
+
+    def test_cut_off_inside_an_open_block_is_not_graded(self):
+        reply = "```cpp\nint f() {\n    // Actually, let's use a different approach:\n    // Actually"
+        with self.assertRaisesRegex(ResponseTruncatedError, "no complete code block"):
+            agent(sampling_file=sampling(THINKING_OFF))._code_from_cut_off_reply(reply)
+
+    def test_closed_block_without_thinking_is_graded(self):
+        reply = "```go\nfunc f() int { return 1 }\n```\nExplanation: the loop"
+        self.assertEqual(agent(sampling_file=sampling(THINKING_OFF))._code_from_cut_off_reply(reply),
+                         "func f() int { return 1 }")
+
+    def test_marker_only_block_is_not_complete_code(self):
+        reply = "```bash\necho COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n```\n```rust\nfn f"
+        with self.assertRaises(ResponseTruncatedError):
+            agent(sampling_file=sampling(THINKING_OFF))._code_from_cut_off_reply(reply)
+
+
+class FakeClient:
+    """Stands in for AsyncOpenAI: records its settings and returns one canned reply."""
+    reply, finish_reason, settings, request = "", "stop", None, None
+
+    def __init__(self, **settings):
+        FakeClient.settings = settings
+        self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
+
+    async def _create(self, **request):
+        FakeClient.request = request
+        message = types.SimpleNamespace(content=FakeClient.reply)
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(message=message, finish_reason=FakeClient.finish_reason)],
+            usage=types.SimpleNamespace(prompt_tokens=7, completion_tokens=100))
+
+    async def close(self):
+        pass
+
+
+class FakeEnvironment:
+    commands = []
+
+    async def exec(self, command):
+        self.commands.append(command)
+        return types.SimpleNamespace(return_code=0, stderr="")
+
+
+class RunTests(unittest.TestCase):
+    def run_agent(self, a, reply, finish_reason="stop"):
+        """Run agent `a` on a Rust task (with the locale's LANGUAGE set) against a canned reply."""
+        FakeClient.reply, FakeClient.finish_reason = reply, finish_reason
+        env = FakeEnvironment()
+        with mock.patch.object(simple_code_agent, "AsyncOpenAI", FakeClient), \
+                mock.patch.dict(os.environ, {"LANGUAGE": "en_US:en"}):
+            asyncio.run(a.run(instruction("rust"), env, None))
+        return env
+
+    def test_reply_is_saved_and_submitted_without_retries(self):
+        a = agent()
+        env = self.run_agent(a, "plan</think>\n```rust\nfn f() {}\n```")
+        self.assertEqual(FakeClient.settings["max_retries"], 0)
+        self.assertEqual(FakeClient.settings["timeout"], 1200.0)
+        self.assertEqual(FakeClient.request["max_tokens"], 32768)
+        self.assertEqual(json.loads((a.logs_dir / "solution.json").read_text()), {"language": "rust", "code": "fn f() {}"})
+        self.assertEqual(json.loads((a.logs_dir / "usage.json").read_text())["finish_reason"], "stop")
+        self.assertIn("/workspace/solution.json", env.commands[-1])
+
+    def test_cut_off_reply_is_saved_before_failing(self):
+        a = agent()
+        with self.assertRaises(ResponseTruncatedError):
+            self.run_agent(a, "still planning, still planning", finish_reason="length")
+        self.assertEqual((a.logs_dir / "response.txt").read_text(), "still planning, still planning")
+        self.assertEqual(json.loads((a.logs_dir / "usage.json").read_text()),
+                         {"finish_reason": "length", "prompt_tokens": 7, "completion_tokens": 100})
+        self.assertFalse((a.logs_dir / "solution.json").exists())
+
+    def test_empty_reply_is_a_model_failure(self):
+        with self.assertRaises(EmptySolutionError):
+            self.run_agent(agent(), "plan</think>\n")
 
 
 if __name__ == "__main__":
