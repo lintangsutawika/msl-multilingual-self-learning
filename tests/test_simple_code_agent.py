@@ -155,7 +155,7 @@ class ExtractReplyTests(unittest.TestCase):
 
 class FakeClient:
     """Stands in for AsyncOpenAI: records its settings and returns one canned reply."""
-    reply, finish_reason, settings, request = "", "stop", None, None
+    reply, finish_reason, settings, request, reasoning = "", "stop", None, None, None
 
     def __init__(self, **settings):
         FakeClient.settings = settings
@@ -163,7 +163,7 @@ class FakeClient:
 
     async def _create(self, **request):
         FakeClient.request = request
-        message = types.SimpleNamespace(content=FakeClient.reply)
+        message = types.SimpleNamespace(content=FakeClient.reply, reasoning_content=FakeClient.reasoning)
         return types.SimpleNamespace(
             choices=[types.SimpleNamespace(message=message, finish_reason=FakeClient.finish_reason)],
             usage=types.SimpleNamespace(prompt_tokens=7, completion_tokens=100))
@@ -181,9 +181,10 @@ class FakeEnvironment:
 
 
 class RunTests(unittest.TestCase):
-    def run_agent(self, a, reply, finish_reason="stop"):
-        """Run agent `a` on a Rust task (with the locale's LANGUAGE set) against a canned reply."""
-        FakeClient.reply, FakeClient.finish_reason = reply, finish_reason
+    def run_agent(self, a, reply, finish_reason="stop", reasoning=None):
+        """Run agent `a` on a Rust task (with the locale's LANGUAGE set) against a canned reply;
+        `reasoning` is what a server with a reasoning parser returns in its own field."""
+        FakeClient.reply, FakeClient.finish_reason, FakeClient.reasoning = reply, finish_reason, reasoning
         env = FakeEnvironment()
         with mock.patch.object(simple_code_agent, "AsyncOpenAI", FakeClient), \
                 mock.patch.dict(os.environ, {"LANGUAGE": "en_US:en"}):
@@ -199,7 +200,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(json.loads((a.logs_dir / "solution.json").read_text()), {"language": "rust", "code": "fn f() {}"})
         self.assertEqual(json.loads((a.logs_dir / "usage.json").read_text()),
                          {"finish_reason": "stop", "prompt_tokens": 7, "completion_tokens": 100,
-                          "code_from": "language_block"})
+                          "reasoning_field": False, "code_from": "language_block"})
         self.assertIn("/workspace/solution.json", env.commands[-1])
 
     def test_cut_off_reply_is_saved_before_failing(self):
@@ -208,8 +209,23 @@ class RunTests(unittest.TestCase):
             self.run_agent(a, "still planning, still planning", finish_reason="length")
         self.assertEqual((a.logs_dir / "response.txt").read_text(), "still planning, still planning")
         self.assertEqual(json.loads((a.logs_dir / "usage.json").read_text()),
-                         {"finish_reason": "length", "prompt_tokens": 7, "completion_tokens": 100})
+                         {"finish_reason": "length", "prompt_tokens": 7, "completion_tokens": 100,
+                          "reasoning_field": False})
         self.assertFalse((a.logs_dir / "solution.json").exists())
+
+    def test_reasoning_field_is_put_back_in_front_of_the_answer(self):
+        a = agent()
+        self.run_agent(a, "```rust\nfn f() {}\n```", reasoning="```rust\nfn draft() {}\n```")
+        self.assertEqual((a.logs_dir / "response.txt").read_text(),
+                         "```rust\nfn draft() {}\n```</think>```rust\nfn f() {}\n```")
+        self.assertEqual(json.loads((a.logs_dir / "solution.json").read_text())["code"], "fn f() {}")
+        self.assertTrue(json.loads((a.logs_dir / "usage.json").read_text())["reasoning_field"])
+
+    def test_cut_off_in_the_reasoning_field_is_still_thinking(self):
+        a = agent(sampling_file=sampling(THINKING_OFF))  # e.g. K2-Horizon: no enable_thinking switch
+        with self.assertRaisesRegex(ResponseTruncatedError, "still thinking"):
+            self.run_agent(a, "", finish_reason="length", reasoning="```rust\nfn draft() {}\n``` and so")
+        self.assertEqual((a.logs_dir / "response.txt").read_text(), "```rust\nfn draft() {}\n``` and so")
 
     def test_empty_reply_is_a_model_failure(self):
         with self.assertRaises(EmptySolutionError):

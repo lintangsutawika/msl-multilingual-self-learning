@@ -85,7 +85,20 @@ def emit(var, val):
         return
     print(f"{var}={shlex.quote(val)}")
 if isinstance(c.get("extra_args"), list):
-    emit("VLLM_ARGS_EXTRA", " ".join(str(a) for a in c["extra_args"]))
+    args = [str(a) for a in c["extra_args"]]
+    # SimpleCodeAgent sends no tools, and a tool-call parser rewrites the reply text
+    # (it drops the </think> that ends Qwen's reasoning), so serve it without one.
+    if "simple_code_agent" in os.environ.get("AGENT", ""):
+        kept, skip = [], False
+        for a in args:
+            if skip:
+                skip = False
+            elif a == "--tool-call-parser":
+                skip = True
+            elif a != "--enable-auto-tool-choice" and not a.startswith("--tool-call-parser="):
+                kept.append(a)
+        args = kept
+    emit("VLLM_ARGS_EXTRA", " ".join(args))
 if c.get("max_model_len"):
     emit("MAX_MODEL_LEN", str(c["max_model_len"]))
 PY

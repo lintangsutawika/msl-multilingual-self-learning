@@ -109,7 +109,7 @@ class SimpleCodeAgent(BaseAgent):
         return "simple-code-agent"
 
     def version(self) -> str:
-        return "0.7.0"
+        return "0.8.0"
 
     def _messages(self, instruction: str) -> list[dict[str, str]]:
         """System and user messages: the task text up to agent.drop_task_from (the
@@ -139,13 +139,26 @@ class SimpleCodeAgent(BaseAgent):
         kwargs = (self._request_kwargs.get("extra_body") or {}).get("chat_template_kwargs") or {}
         return bool(kwargs.get("enable_thinking"))
 
-    def _extract(self, content: str, language: str, cut_off: bool) -> tuple[str, str]:
+    @staticmethod
+    def _reply_text(message) -> tuple[str, bool]:
+        """(text, reasoned): the reply in one format, reasoning</think>answer. A server with a
+        reasoning parser returns the reasoning in its own field (reasoning_content or
+        reasoning) and only the answer as content; it is put back in front of the answer,
+        with </think> only once an answer has started."""
+        content = message.content or ""
+        reasoning = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None) or ""
+        if not reasoning:
+            return content, False
+        return reasoning + ("</think>" + content if content else ""), True
+
+    def _extract(self, content: str, language: str, cut_off: bool, thinking: bool | None = None) -> tuple[str, str]:
         """(code, rule) from the reply. Only the final answer counts (the text after the
         last </think>). A block tagged with the task's language wins over other blocks; a
         reply with no block is taken whole (rule whole_text). A reply that hit max_tokens
         needs a closed block: cut off while still thinking (no </think> yet) any code is a
         draft, and cut off inside an open block the code is unfinished."""
-        if cut_off and self._thinking() and "</think>" not in content:
+        thinking = self._thinking() if thinking is None else thinking
+        if cut_off and thinking and "</think>" not in content:
             raise ResponseTruncatedError("Reply hit max_tokens while still thinking")
         answer = content.rsplit("</think>", 1)[-1].strip()
         found = extract_code(answer, language)
@@ -211,19 +224,21 @@ class SimpleCodeAgent(BaseAgent):
         )
         await client.close()
         choice = response.choices[0]
-        content = choice.message.content or ""
+        content, reasoned = self._reply_text(choice.message)
 
-        # Keep the raw reply (cut off or not) and its length next to solution.json for review.
+        # Keep the reply (cut off or not) and its length next to solution.json for review.
         (self.logs_dir / "response.txt").write_text(content, encoding="utf-8")
         usage = response.usage
         record = {
             "finish_reason": choice.finish_reason,
             "prompt_tokens": usage.prompt_tokens if usage else None,
             "completion_tokens": usage.completion_tokens if usage else None,
+            "reasoning_field": reasoned,
         }
         (self.logs_dir / "usage.json").write_text(json.dumps(record), encoding="utf-8")
 
-        code, record["code_from"] = self._extract(content, language, cut_off=choice.finish_reason == "length")
+        code, record["code_from"] = self._extract(content, language, cut_off=choice.finish_reason == "length",
+                                                   thinking=self._thinking() or reasoned)
         (self.logs_dir / "usage.json").write_text(json.dumps(record), encoding="utf-8")
         if not code:
             raise EmptySolutionError("Model returned no source code")
