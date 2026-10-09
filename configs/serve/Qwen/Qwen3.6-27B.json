@@ -16,7 +16,7 @@
     "--reasoning-parser",
     "qwen3",
     "--speculative-config",
-    "{\"method\": \"mtp\", \"num_speculative_tokens\": 2}"
+    "{\"method\":\"mtp\",\"num_speculative_tokens\":2}"
   ],
   "spec_config": null,
   "max_model_len": 262144,
