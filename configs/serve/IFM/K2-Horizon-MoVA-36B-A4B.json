@@ -1,0 +1,28 @@
+{
+  "_model": "IFM/K2-Horizon-MoVA-36B-A4B",
+  "_note": "IFM K2-Horizon-MoVA-36B-A4B (MoE 36B total / 4B active, MoVA attention, BF16). Native 512K context. Reasoning + tool-use.",
+  "_note_serve": "Per the IFM card: vLLM serve --revision main --tensor-parallel-size 2 --enable-expert-parallel --trust-remote-code --reasoning-parser k2_horizon --tool-call-parser k2_horizon --enable-auto-tool-choice. CUSTOM REMOTE CODE -> --trust-remote-code REQUIRED. Non-FP8 (BF16) weights, so --dtype bfloat16 is fine. Wrong tool parser silently zeroes the eval (memory: vllm-tool-parser-gotcha).",
+  "extra_args": [
+    "--enable-chunked-prefill",
+    "--enable-prefix-caching",
+    "--enforce-eager",
+    "--trust-remote-code",
+    "--dtype",
+    "bfloat16",
+    "--enable-auto-tool-choice",
+    "--enable-expert-parallel",
+    "--tool-call-parser",
+    "k2_horizon",
+    "--reasoning-parser",
+    "k2_horizon",
+    "--chat-template-content-format",
+    "string",
+    "--max-num-batched-tokens",
+    "32768"
+  ],
+  "spec_config": null,
+  "max_model_len": 262144,
+  "native_max_context": 524288,
+  "_note_context": "Served window capped at 262144 (matches the other K2 Horizon configs); native is 524288 (512K). Raise if GPUs allow (TP=2 36B needs ample VRAM).",
+  "_status": "UNVERIFIED -- requires vLLM with k2_horizon parser + MoVA arch support (recent vLLM main or a release supporting K2). Confirm tool calls parse before a real run (vllm-tool-parser-gotcha)."
+}

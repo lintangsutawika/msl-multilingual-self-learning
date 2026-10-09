@@ -69,12 +69,43 @@ if [[ "${AGENT:-}" == *simple_code_agent* ]]; then
     CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode-simple-code-agent.yaml}"
     [ -f "${SAMPLING_FILE}" ] || { echo "ERROR: sampling file not found: ${SAMPLING_FILE}" >&2; exit 2; }
 fi
-# Per-model sampling config: configs/sampling/<repo>.yaml wins when present;
-# else fall back to config/leetcode.yaml. An explicit CONFIG_FILE always wins.
-if [ -z "${CONFIG_FILE:-}" ] && [ -f "configs/sampling/${_MODEL_BARE}.yaml" ]; then
-    CONFIG_FILE="configs/sampling/${_MODEL_BARE}.yaml"
-fi
+# Agent scaffold comes from configs/task/leetcode.yaml (system prompt, instance
+# template, environment, observation/format templates). Per-model sampling knobs live
+# in configs/sampling/<repo>.yaml (model.model_kwargs: max_tokens, temperature, ...).
+# These are COMPLEMENTARY, not alternatives: a per-model sampling yaml must be
+# DEEP-MERGED on top of leetcode.yaml so the scaffold is preserved and the sampling
+# overrides apply -- NOT substituted for it (substituting drops the whole agent
+# template, which previously made leetcode.yaml never actually get used).
+#   CONFIG_FILE  -> configs/task/leetcode.yaml (the agent scaffold)
+#   SAMPLING_CONFIG  -> configs/sampling/<repo>.yaml (sampling overrides, optional)
+#   MERGED_CONFIG    -> <CONFIG_FILE> with SAMPLING_CONFIG deep-merged onto it
+# An explicit CONFIG_FILE still wins as the scaffold; set SAMPLING_CONFIG to a custom
+# sampling yaml (or empty to skip merging).
+# (SimpleCodeAgent already has CONFIG_FILE and SAMPLING_FILE above, so it skips the merge.)
 CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode.yaml}"
+SAMPLING_CONFIG="${SAMPLING_CONFIG:-configs/sampling/${_MODEL_BARE}.yaml}"
+if [ -z "${SAMPLING_FILE}" ] && [ -n "${SAMPLING_CONFIG}" ] && [ -f "${SAMPLING_CONFIG}" ]; then
+    _MERGED="${CONFIG_FILE%.yaml}.merged.yaml"
+    uv run python - "${CONFIG_FILE}" "${SAMPLING_CONFIG}" "${_MERGED}" <<'PY'
+import sys, yaml
+
+def deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+cfg = yaml.safe_load(open(sys.argv[1]))
+samp = yaml.safe_load(open(sys.argv[2])) or {}
+merged = deep_merge(cfg or {}, samp)
+with open(sys.argv[3], "w") as f:
+    yaml.safe_dump(merged, f, sort_keys=False)
+PY
+    CONFIG_FILE="${_MERGED}"
+fi
 # Deterministic JOB_NAME so a resume works across walltime chunks AND RUN=0,1,2,...
 # gives repeat (non-colliding) runs of the same data+model. Derived from TASK_PATH
 # (dataset slug = FULL TASK_PATH, / -> --) + MODEL (bare, / -> --). Set JOB_NAME to override.

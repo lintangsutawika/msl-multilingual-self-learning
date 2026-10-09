@@ -119,7 +119,33 @@ pick_free_port() {
     done
     echo "${p}"
 }
-SERVE_PORT="${VLLM_PORT:-$(pick_free_port)}"
+# Deterministic per-JOB_NAME serve port so a RESUME reuses the SAME endpoint as its
+# original run (trial config.json bakes OPENAI_BASE_URL=<first-run port>; a fresh
+# random port per rerun leaves resumed agents hitting a dead port ->
+# NetworkConnectionError). Falls back to a random port if the hashed one is taken.
+job_port() {
+    local jn="${JOB_NAME:-default}" base p
+    base=$(( ( $(printf '%s' "$jn" | cksum | cut -d' ' -f1) % 16384 ) + 49152 ))
+    for _ in $(seq 1 64); do
+        p=$base
+        ss -Htln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${p}$" || { echo "${p}"; return 0; }
+        base=$(( (base + 1) % 65535 ))
+    done
+    echo "$base"
+}
+# Deterministic JOB_NAME (same formula as run.sh: <dataset-slug>_<model>-run-<RUN>)
+# computed BEFORE SERVE_PORT so job_port() hashes the REAL job name. Without this
+# JOB_NAME is empty -> job_port("default") = 54084 for EVERY job, so resume can't
+# reuse a per-run port and the config's baked endpoint never matches the serve.
+_JB_MODEL_BARE="${MODEL#openai/}"
+_JB_MODEL_BARE="${_JB_MODEL_BARE#litellm_proxy/}"
+_JB_RUN="${RUN:-0}"
+_JB_SLUG="${TASKS%/}"   # dataset slug (full task path, / -> --)
+_JB_SLUG="${_JB_SLUG#./}"
+_JB_SLUG="${_JB_SLUG#/}"
+_JB_SLUG="${_JB_SLUG//\//--}"
+JOB_NAME="${JOB_NAME:-${_JB_SLUG}_${_JB_MODEL_BARE//\//--}-run-${_JB_RUN}}"
+SERVE_PORT="${VLLM_PORT:-$(job_port)}"
 
 VLLM_PID=""
 EVAL_PID=""
@@ -141,12 +167,19 @@ trap cleanup EXIT SIGTERM SIGINT
 
 if [ "${SERVE_VLLM}" = "1" ]; then
     echo "[serve] launching vLLM ${MODEL} on 127.0.0.1:${SERVE_PORT} via scripts/serve/serve_vllm.sh"
+    # Capture the serve output to a real log (not /dev/null) so vLLM startup and
+    # connection failures are debuggable. NOTE: keep these BEFORE the VAR=... \
+    # continuation block -- a '#' inside it terminates the whole env-prefix command,
+    # dropping PORT (server then falls back to 8000 and the 8 ApiServers collide ->
+    # hang).
+    _SERVE_LOG="${SERVE_LOG:-logs/serve-${PBS_JOBID:-$$}.log}"
+    mkdir -p logs
     VLLM_CUDA_SIF="${VLLM_CUDA_SIF:-}" MODEL="${MODEL}" PORT="${SERVE_PORT}" \
         BASE_DIR="${BASE_DIR:-${PBS_LOCALDIR:-${TMPDIR:-/tmp}}}" \
         MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}" \
-        VLLM_ARGS_EXTRA="${VLLM_ARGS_EXTRA:-}" \
-        bash scripts/serve/serve_vllm.sh > /dev/null 2>&1 &
+        VLLM_ARGS_EXTRA="${VLLM_ARGS_EXTRA:-}" bash scripts/serve/serve_vllm.sh > "${_SERVE_LOG}" 2>&1 &
     VLLM_PID=$!
+    echo "[serve] serve log: ${_SERVE_LOG}"
 
     SERVE_READY_TRIES="${SERVE_READY_TRIES:-180}"   # ~15 min at 5s
     echo "[serve] waiting for /health on :${SERVE_PORT} (up to $((SERVE_READY_TRIES * 5))s) ..."
