@@ -1,52 +1,40 @@
 """Build the neulab/leetcode Hugging Face dataset from LeetCode + GraphQL.
 
-This is the PREP step (build once, push to HF). It fetches raw LeetCode rows from
-newfacade/LeetCodeDataset, pulls per-language codeSnippets via LeetCode GraphQL,
-constructs the 9-language `interfaces` + `canonical_tests` per problem, flattens to
-one row per (problem, language), and writes `data/<split>/<lang>-NNN.jsonl`
-(row-boundary shards so every file stays under HF's ~10 MiB per-file ceiling; HF
-globs them into one split). After `git push`,
-`datasets.load_dataset("neulab/leetcode", split=...)`
-returns the rows, which dataset.py pulls at generation time.
+This is the PREP step (build once, push to HF). It takes the canonical tests from
+newfacade/LeetCodeDataset, fetches each problem's LeetCode page (crawl.py), builds
+the 9-language `interfaces`, the description and the cleaned tests (clean.py),
+flattens to one row per (problem, language), and writes `data/<split>/<lang>-NNN.jsonl`
+(row-boundary shards under HF's ~10 MiB per-file ceiling) plus `reports/` listing
+every dropped problem and test. After `git push`,
+`datasets.load_dataset("neulab/leetcode", split=...)` returns the rows, which
+dataset.py pulls at generation time.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[4]))  # repo root
-
-from src.benchmarks.leetcode.adapter import LANGUAGES  # noqa: E402
-
-
-"""Build LeetCode problem rows (the execution-dataset schema) live from HF.
-
-Replaces the old committed ``leetcode_multilingual_*.jsonl`` + ``generate_dataset.py``:
-``load_problems_hf(split)`` fetches ``newfacade/LeetCodeDataset`` rows for a split and
-reconstructs the per-language ``interfaces`` (fetched lazily from LeetCode's
-``codeSnippets`` API and cached locally) and ``canonical_tests`` (from HF ``test``),
-returning the same problem-row dicts that ``main.py``/``adapter`` consume. No committed
-JSONL, no doocs checkout, no manual cache prep: snippets are fetched on demand and
-cached under ``benchmarks/leetcode/data/cache/leetcode_snippets``.
-"""
-
+import argparse
 import json
-import re
-
 from dataclasses import dataclass
-from datasets import load_dataset
-
-import requests
-import time
 from pathlib import Path
 from typing import Any
 
-from src.benchmarks.leetcode.hf_dataset.derive import parse_hf_python_signature
-from src.benchmarks.leetcode.hf_dataset.parsers import (
-    LANGUAGE_SLUGS,
-    parse_leetcode_interface,
-)
+from datasets import load_dataset
 
+from .clean import (
+    apply_comparison,
+    apply_drop_categories,
+    clean_tests,
+    comparison_for,
+    drop_list,
+    flags,
+    mark_overlap,
+    problem_drops,
+    public_examples,
+    summarize,
+)
+from .crawl import DEFAULT_CACHE_DIR, load_or_fetch
+from .derive import parse_hf_python_signature
+from .description import html_to_text
+from .parsers import LANGUAGE_SLUGS, parse_leetcode_interface
 
 LANGUAGES = (
     "python",
@@ -61,201 +49,8 @@ LANGUAGES = (
 )
 
 DATASET_NAME = "newfacade/LeetCodeDataset"
-# Our hosted, post-interface dataset on HF (pushed from benchmarks/leetcode/hf_dataset).
+# Our hosted dataset on HF.
 NEULAB_HF_DATASET = "neulab/leetcode"
-
-LEETCODE_SNIPPET_CACHE = Path(
-    "benchmarks/leetcode/data/cache/leetcode_snippets"
-)
-
-DEFAULT_OUTPUT = Path(
-    "benchmarks/leetcode/data/leetcode_multilingual.jsonl"
-)
-
-
-def _problem_value(
-    problem: Any,
-    name: str,
-    default: Any = None,
-) -> Any:
-    return getattr(
-        problem,
-        name,
-        default,
-    )
-
-
-def _normalize_whitespace(
-    text: str,
-) -> str:
-    return re.sub(
-        r"\s+",
-        " ",
-        text,
-    ).strip()
-
-
-def _normalize_cpp(
-    text: str,
-) -> str:
-    text = _normalize_whitespace(
-        text
-    )
-
-    text = re.sub(
-        r"\s*&\s*",
-        "&",
-        text,
-    )
-
-    text = re.sub(
-        r"\s*\*\s*",
-        "*",
-        text,
-    )
-
-    return text
-
-
-def _parameter_type_appears_in_signature(
-    language: str,
-    raw_signature: str,
-    name: str,
-    type_name: str,
-) -> bool:
-    if language == "python":
-        normalized = _normalize_whitespace(
-            raw_signature
-        )
-
-        pattern = re.compile(
-            rf"\b{re.escape(name)}\s*:\s*"
-            rf"{re.escape(type_name)}"
-        )
-
-        return bool(
-            pattern.search(
-                normalized
-            )
-        )
-
-    if language == "cpp":
-        signature = _normalize_cpp(
-            raw_signature
-        )
-
-        fragment = _normalize_cpp(
-            f"{type_name} {name}"
-        )
-
-        return fragment in signature
-
-    if language == "go":
-        signature = _normalize_whitespace(
-            raw_signature
-        )
-
-        fragment = f"{name} {type_name}"
-
-        return fragment in signature
-
-    if language == "java":
-        signature = _normalize_whitespace(
-            raw_signature
-        )
-
-        fragment = f"{type_name} {name}"
-
-        return fragment in signature
-
-    raise ValueError(
-        f"Unsupported language: {language}"
-    )
-
-
-def _go_return_type_appears(
-    raw_signature: str,
-    return_type: str,
-) -> bool:
-    signature = _normalize_whitespace(
-        raw_signature
-    )
-
-    # Plain return:
-    # func foo(x int) []int {
-    plain_pattern = re.compile(
-        rf"\)\s*"
-        rf"{re.escape(return_type)}"
-        rf"\s*\{{"
-    )
-
-    if plain_pattern.search(
-        signature
-    ):
-        return True
-
-    # Named return:
-    # func foo(x int) (ans []int) {
-    named_pattern = re.compile(
-        rf"\)\s*\([^)]*\s"
-        rf"{re.escape(return_type)}"
-        rf"\s*\)\s*\{{"
-    )
-
-    return bool(
-        named_pattern.search(
-            signature
-        )
-    )
-
-
-def _return_type_appears_in_signature(
-    language: str,
-    raw_signature: str,
-    callable_name: str,
-    return_type: str,
-) -> bool:
-    if language == "python":
-        normalized = _normalize_whitespace(
-            raw_signature
-        )
-
-        return (
-            f"-> {return_type}"
-            in normalized
-        )
-
-    if language == "cpp":
-        signature = _normalize_cpp(
-            raw_signature
-        )
-
-        fragment = _normalize_cpp(
-            f"{return_type} {callable_name}"
-        )
-
-        return fragment in signature
-
-    if language == "go":
-        return _go_return_type_appears(
-            raw_signature,
-            return_type,
-        )
-
-    if language == "java":
-        signature = _normalize_whitespace(
-            raw_signature
-        )
-
-        fragment = (
-            f"{return_type} {callable_name}"
-        )
-
-        return fragment in signature
-
-    raise ValueError(
-        f"Unsupported language: {language}"
-    )
 
 
 def _interface_to_dict(
@@ -277,210 +72,127 @@ def _interface_to_dict(
         "type_source": "leetcode/codeSnippets",
     }
 
-_GRAPHQL_URL = "https://leetcode.com/graphql"
-_GRAPHQL_HEADERS = {
-    "Content-Type": "application/json",
-    "Referer": "https://leetcode.com/problems/",
-}
-
-
-# One-time train/full builds hit LeetCode's GraphQL repeatedly; pace requests and
-# back off on rate-limits so we don't get dropped by transient 429s/5xx. Resume is
-# provided by the per-question snippet cache: a re-run skips already-cached IDs.
-_RATE_DELAY = 3.0          # seconds between GraphQL requests (set via --rate-delay)
-_SNIP_MAX_RETRIES = 5      # backoff attempts before giving up on one question
-_SNIP_BASE_BACKOFF = 2.0   # first retry backoff (seconds); doubles each attempt
-
-
-def _paced_via_cache(question_id: int) -> dict[str, str] | None:
-    """Return cached snippets for question_id, or None if not cached yet."""
-    cached = LEETCODE_SNIPPET_CACHE / f"{question_id}.json"
-    if cached.is_file():
-        try:
-            rec = json.loads(cached.read_text("utf-8"))
-            return {sn["langSlug"]: sn["code"] for sn in rec.get("code_snippets", [])}
-        except (OSError, ValueError):
-            pass  # corrupt cache entry -> re-fetch
-    return None
-
-
-def _fetch_snippets(question_id: int, title_slug: str) -> dict[str, str] | None:
-    """Fetch a problem's per-language codeSnippets from LeetCode with rate-limit
-    + backoff, and cache them.
-
-    Returns {langSlug: code} on success, or None after exhausting retries (the
-    caller records a skip). Caches the raw snippet record under
-    leetcode_snippets/<qid>.json so repeat builds don't re-hit the API and failed
-    runs resume from where they stopped.
-    """
-    cached = _paced_via_cache(question_id)
-    if cached is not None:
-        return cached
-
-    query = {
-        "query": (
-            "query questionData($titleSlug: String!) { "
-            "question(titleSlug: $titleSlug) { "
-            "questionId title codeSnippets { langSlug code } } }"
-        ),
-        "variables": {"titleSlug": title_slug},
-    }
-    snippets = None
-    for attempt in range(_SNIP_MAX_RETRIES):
-        try:
-            resp = requests.post(
-                _GRAPHQL_URL,
-                json=query,
-                headers=_GRAPHQL_HEADERS,
-                timeout=30,
-            )
-            if resp.status_code == 429 or resp.status_code >= 500:
-                retry_after = float(resp.headers.get("Retry-After", 0) or 0)
-                backoff = retry_after or _SNIP_BASE_BACKOFF * (2 ** attempt)
-                print(f"    rate-limited (HTTP {resp.status_code}); "
-                      f"backing off {backoff:.0f}s")
-                time.sleep(backoff)
-                continue
-            resp.raise_for_status()
-            qn = (resp.json().get("data") or {}).get("question") or {}
-            snippets = qn.get("codeSnippets")
-            break
-        except requests.RequestException:
-            # transient network error: brief backoff then retry
-            time.sleep(_SNIP_BASE_BACKOFF * (2 ** attempt))
-            continue
-
-    if not snippets:
-        return None
-
-    record = {"question_id": question_id, "code_snippets": snippets}
-    out = LEETCODE_SNIPPET_CACHE / f"{question_id}.json"
-    try:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass  # cache is best-effort; interfaces still usable this run
-
-    time.sleep(_RATE_DELAY)  # pace between successful fetches
-    return {sn["langSlug"]: sn["code"] for sn in snippets}
-
 
 def _resolve_all_interfaces(
-    problem: Any,
-) -> dict[str, Any] | None:
-    question_id = int(
-        _problem_value(
-            problem,
-            "question_id",
-        )
-    )
-
-    cache_path = (
-        LEETCODE_SNIPPET_CACHE
-        / f"{question_id}.json"
-    )
-
-    if not cache_path.exists():
-        title_slug = _problem_value(problem, "task_id", "")
-        snippets = _fetch_snippets(question_id, title_slug)
-        if snippets is None:
-            return None
-    else:
-        record = json.loads(
-            cache_path.read_text(
-                encoding="utf-8",
-            )
-        )
-        snippets = {
-            snippet["langSlug"]: snippet["code"]
-            for snippet in record["code_snippets"]
-        }
-
+    problem: LeetCodeProblem,
+    question: dict[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
+    """Interfaces for the 9 languages, and why any is missing."""
+    snippets = {s["langSlug"]: s["code"] for s in question.get("codeSnippets") or []}
     interfaces: dict[str, Any] = {}
+    problems: list[str] = []
 
     for language in LANGUAGES:
-        slug = LANGUAGE_SLUGS[language]
-
-        code = snippets.get(slug)
+        code = snippets.get(LANGUAGE_SLUGS[language])
 
         if not code:
-            return None
+            problems.append(f"{language}: no code snippet")
+            continue
 
         try:
-            interface = parse_leetcode_interface(
-                question_id,
-                language,
-                code,
-            )
-        except Exception:
-            # One malformed language signature (e.g. an unusual C++/PHP param form
-            # the parser doesn't handle) should skip the whole problem, not crash
-            # the dataset build -- mirrors the old generate_dataset skip behavior.
-            return None
+            interface = parse_leetcode_interface(problem.question_id, language, code)
+        except Exception as exc:
+            # One malformed signature skips the whole problem (reported).
+            problems.append(f"{language}: {type(exc).__name__}: {exc}"[:200])
+            continue
 
         if interface is None:
-            return None
+            problems.append(f"{language}: unparsed signature")
+            continue
 
-        interfaces[language] = (
-            _interface_to_dict(
-                interface,
-            )
-        )
+        interfaces[language] = _interface_to_dict(interface)
 
-    return interfaces
+    return interfaces, problems
+
 
 def _build_record(
-    problem: Any,
+    problem: LeetCodeProblem,
+    question: dict[str, Any],
+    crawled: dict[str, Any],
     interfaces: dict[str, Any],
+    description: str,
+    tests: str,
+    entry: dict[str, Any],
 ) -> dict[str, Any]:
     return {
-        "question_id": _problem_value(
-            problem,
-            "question_id",
-        ),
-        "task_id": _problem_value(
-            problem,
-            "task_id",
-        ),
-        "difficulty": _problem_value(
-            problem,
-            "difficulty",
-        ),
-        "problem_description": _problem_value(
-            problem,
-            "problem_description",
-        ),
+        "question_id": problem.question_id,
+        "task_id": problem.task_id,
+        "difficulty": question.get("difficulty") or problem.difficulty,
+        "problem_description": description,
         "interfaces": interfaces,
         "canonical_tests": {
             "language": "python",
-            "source": _problem_value(
-                problem,
-                "test",
-            ),
+            "source": apply_comparison(tests, entry["comparison"]),
+            "comparison": entry["comparison"],
         },
+        # LeetCode's Testcase panel (exampleTestcaseList): one string per case, one JSON
+        # value per line in parameter order. Inputs only: LeetCode publishes no outputs.
+        "public_tests": question.get("exampleTestcaseList") or [],
+        "hints": entry["hints"],
         "metadata": {
-            "canonical_parameter_names": [
-                parameter.name
-                for parameter in parse_hf_python_signature(
-                    _problem_value(problem, "starter_code")
-                ).parameters
-            ],
-            "leetcode_dataset_entry_point": (
-                _problem_value(
-                    problem,
-                    "entry_point",
-                )
-            ),
-            "problem_source": (
-                "newfacade/LeetCodeDataset"
-            ),
-            "interface_source": (
-                "leetcode/codeSnippets"
-            ),
+            "canonical_parameter_names": entry["parameter_names"],
+            "leetcode_dataset_entry_point": problem.entry_point,
+            "problem_source": DATASET_NAME,
+            "description_source": "leetcode.com",
+            "interface_source": "leetcode/codeSnippets",
+            "fetched_at": crawled["fetched_at"],
+            "tests_total": entry["tests"]["total"],
+            "tests_dropped": len(entry["dropped_tests"]),
+            "flags": entry["flags"],
+            "topic_tags": [t["slug"] for t in question.get("topicTags") or []],
         },
     }
 
 
+def build_problem(
+    problem: LeetCodeProblem,
+    *,
+    cache_dir: Path,
+    rate_delay: float,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """(record or None if dropped, report entry) for one problem."""
+    crawled = load_or_fetch(problem.question_id, problem.task_id, cache_dir, rate_delay)
+    question = crawled["question"] if crawled else None
+    entry: dict[str, Any] = {
+        "question_id": problem.question_id,
+        "task_id": problem.task_id,
+        "drop": problem_drops(question),
+    }
+    if question is None or entry["drop"] == ["premium"]:
+        return None, entry
+    try:
+        entry["similar"] = [q["titleSlug"] for q in json.loads(question.get("similarQuestions") or "[]")]
+    except ValueError:
+        entry["similar"] = []
+
+    description = html_to_text(question["content"])
+    interfaces, interface_problems = _resolve_all_interfaces(problem, question)
+    if interface_problems:
+        entry["drop"].append("interface")
+        entry["interface_problems"] = interface_problems
+    entry["flags"] = flags(problem.question_id, description.text, interfaces, question,
+                           len(description.images) + description.videos)
+    entry["comparison"] = comparison_for(entry["flags"])
+    entry["parameter_names"] = [p.name for p in parse_hf_python_signature(problem.starter_code).parameters]
+
+    examples = public_examples(question, entry["parameter_names"])
+    tests, test_report = clean_tests(
+        {
+            "question_id": problem.question_id,
+            "metadata": {"canonical_parameter_names": entry["parameter_names"]},
+            "canonical_tests": {"language": "python", "source": problem.test},
+            "interfaces": interfaces,
+        },
+        question["content"],
+        examples,
+    )
+    entry["drop"] += test_report.pop("drop")
+    entry.update(test_report)
+    if entry["drop"]:
+        return None, entry
+    entry["public_tests"] = len(question.get("exampleTestcaseList") or [])
+    entry["hints"] = [html_to_text(h).text.strip() for h in question.get("hints") or []]
+    return _build_record(problem, question, crawled, interfaces, description.text, tests, entry), entry
 
 
 SPLITS = ("train", "test")
@@ -489,20 +201,11 @@ SPLITS = ("train", "test")
 def build_problems_hf(
     split: str = "test",
     *,
+    cache_dir: Path = DEFAULT_CACHE_DIR,
     rate_delay: float = 3.0,
     limit: int | None = None,
-) -> "list[dict]":
-    """Build post-interface rows for a split via HF newfacade + LeetCode GraphQL.
-
-    This is the PREP step: it fetches codeSnippets + interfaces and returns the
-    (nested) per-problem records, then flatten + JSONL happens downstream. Requests
-    are throttled (--rate-delay) with backoff so one-time train/full builds don't
-    trip LeetCode rate limits; the per-question snippet cache makes re-runs resume.
-    `limit` caps how many problems are processed (for smoke-testing a subset).
-    """
-    global _RATE_DELAY
-    _RATE_DELAY = rate_delay
-
+) -> tuple[list[dict], list[dict]]:
+    """Build (records, report entries) for a split; pages are fetched once and cached."""
     if split == "train":
         problems = load_train_split()
     else:
@@ -511,33 +214,25 @@ def build_problems_hf(
         problems = problems[:limit]
 
     records: list[dict] = []
-    skipped = []
+    report: list[dict] = []
     total = len(problems)
     for idx, problem in enumerate(problems, start=1):
-        qid = _problem_value(problem, "question_id")
-        print(f"[{split}] {idx}/{total} qid={qid}", flush=True)
-        interfaces = _resolve_all_interfaces(problem)
-        if interfaces is None:
-            skipped.append((qid, _problem_value(problem, "task_id")))
-            continue
-        records.append(_build_record(problem, interfaces))
+        print(f"[{split}] {idx}/{total} qid={problem.question_id}", flush=True)
+        record, entry = build_problem(problem, cache_dir=cache_dir, rate_delay=rate_delay)
+        report.append(entry)
+        if record is not None:
+            records.append(record)
     if not records:
-        raise RuntimeError("No problems with complete LeetCode interfaces were generated")
-    if skipped:
-        print(f"[{split}] skipped {len(skipped)} (no complete interface): {skipped}")
-    return records
+        raise RuntimeError("No problems were kept")
+    return records, report
 
 
 def flatten(records):
     """Expand nested problem-records into one row per (problem, language)."""
     flat = []
     for rec in records:
-        interfaces = rec.get("interfaces")
-        if not interfaces:
-            flat.append(rec)
-            continue
         base = {k: v for k, v in rec.items() if k != "interfaces"}
-        for language, interface in interfaces.items():
+        for language, interface in rec["interfaces"].items():
             row = dict(base)
             row["language"] = language
             row["interface"] = interface
@@ -548,34 +243,31 @@ def flatten(records):
 def _clean_json_line(r) -> str:
     """Serialize a row to a single JSONL line, escaping raw line-separator chars
     (U+0085/U+2028/U+2029/CR) that HF's line reader would otherwise split on."""
-    line = __import__("json").dumps(r, ensure_ascii=False)
+    line = json.dumps(r, ensure_ascii=False)
     for ch, esc in (("\x85", "\\u0085"),
-                    ("\u2028", "\\u2028"),
-                    ("\u2029", "\\u2029"),
+                    (" ", "\\u2028"),
+                    (" ", "\\u2029"),
                     ("\r", "\\r")):
         line = line.replace(ch, esc)
     return line + "\n"
 
 
-def build(split, out, *, rate_delay=3.0, limit=None, shard_mb=8):
-    records = build_problems_hf(split, rate_delay=rate_delay, limit=limit)
-    if not records:
-        return
+def build(split, records, out, *, shard_mb=8):
+    """Write data/<split>/<lang>-NNN.jsonl, replacing older files."""
     flat = flatten(records)
     split_dir = out / "data" / split
     split_dir.mkdir(parents=True, exist_ok=True)
+    for old in split_dir.glob("*.jsonl"):
+        old.unlink()
     by_lang = {}
     for row in flat:
         by_lang.setdefault(row.get("language"), []).append(row)
     total = 0
     shard_bytes = shard_mb * 1024 * 1024
     for lang, rows in sorted(by_lang.items()):
-        # Write rows as row-boundary shards so every file stays well under HF's
-        # ~10 MiB per-file ceiling; HF globs data/<split>/*.jsonl into one split.
         shard_idx = 0
         fh = None
         used = 0
-        n_shard = 0
         for r in rows:
             line = _clean_json_line(r)
             if fh is None or (used > 0 and used + len(line) > shard_bytes):
@@ -584,20 +276,21 @@ def build(split, out, *, rate_delay=3.0, limit=None, shard_mb=8):
                 fh = (split_dir / f"{lang}-{shard_idx:03d}.jsonl").open("w", encoding="utf-8")
                 shard_idx += 1
                 used = 0
-                n_shard += 1
             fh.write(line)
             used += len(line)
         if fh is not None:
             fh.close()
         total += len(rows)
-        files = sorted(split_dir.glob(f"{lang}-*.jsonl"))
-        print(f"[build] {split}/{lang}: {len(rows)} rows "
-              f"(sharded {n_shard}: {', '.join(f.name for f in files)})")
-    print(f"[build] {split}: {len(flat)} problems -> {total} rows total")
+        print(f"[build] {split}/{lang}: {len(rows)} rows ({shard_idx} shard(s))")
+    print(f"[build] {split}: {len(records)} problems -> {total} rows total")
 
 
-def write_readme(out):
-    readme = """---
+def write_readme(out, reports):
+    splits = "\n".join(
+        f"- `{split}`: {sum(not e['drop'] for e in report)} problems x {len(LANGUAGES)} languages = "
+        f"{sum(not e['drop'] for e in report) * len(LANGUAGES)} rows ({len(report)} in the source dataset)"
+        for split, report in reports.items())
+    (out / "README.md").write_text("""---
 license: apache-2.0
 language:
 - code
@@ -607,12 +300,28 @@ task_categories:
 
 # LeetCode multilingual benchmark dataset
 
-Post-interface rows for the msl-multilingual-self-learning benchmark, flattened to
-one row per (problem, language), stored as `data/<split>/<lang>-NNN.jsonl`
-(row-boundary shards so every file stays under HF's ~10 MiB per-file ceiling; HF
-globs them into a single split). Each row has the `interface` for its `language`,
-plus the shared
-`canonical_tests` oracle, `problem_description`, and `metadata`.
+LeetCode problems for the msl-multilingual-self-learning benchmark, flattened to
+one row per (problem, language) in 9 languages, stored as `data/<split>/<lang>-NNN.jsonl`.
+Each row has the `interface` for its `language` (from LeetCode's code snippets),
+the shared `canonical_tests` (Python asserts from newfacade/LeetCodeDataset),
+the `problem_description` (from the LeetCode page) and `metadata`.
+
+Tests that break the problem's Constraints, do not fit a declared type in some
+language, or expect inf/nan were removed; problems that take trees or linked
+lists, modify their input in place, or kept fewer than 10 tests were dropped.
+The test split also drops problems with several valid answers or whose text
+refers to a figure. Where answers may come in any order or are decimals,
+the asserts call `answers_match` (defined at the top of the test source), and
+`canonical_tests.comparison` says which rule applies ("unordered", "float" or "exact").
+`public_tests` holds the inputs of LeetCode's Testcase panel (one string per
+case, one JSON value per line in parameter order; LeetCode publishes no
+outputs), and `hints` the page's hints as plain text.
+`reports/dropped.md` lists every dropped problem and test count, and
+`reports/<split>.json` has the details.
+
+## Splits
+
+{splits}
 
 ## Load
 
@@ -620,36 +329,57 @@ plus the shared
 from datasets import load_dataset
 train = load_dataset("neulab/leetcode", split="train")
 test  = load_dataset("neulab/leetcode", split="test")
+python_rows = test.filter(lambda r: r["language"] == "python")
 ```
-"""
+""".replace("{splits}", splits))
 
 
 def main():
-    import argparse
     ap = argparse.ArgumentParser(
-        description="Prep a LeetCode split into per-language JSONL for the HF "
-                    "dataset push (throttled GraphQL fetch; resumable via cache)."
+        description="Prep LeetCode splits into per-language JSONL for the HF "
+                    "dataset push (throttled LeetCode fetch; resumable via cache)."
     )
     ap.add_argument("--out", type=Path, default=Path("/home/aci18914wh/leetcode"))
     ap.add_argument("--only", choices=SPLITS, default=None,
                     help="Build only this split (default: all splits).")
     ap.add_argument("--rate-delay", type=float, default=3.0,
-                    help="Seconds between GraphQL requests (default 3.0).")
+                    help="Seconds between LeetCode requests (default 3.0).")
     ap.add_argument("--limit", type=int, default=None,
                     help="Process only the first N problems (smoke-test a subset).")
     ap.add_argument("--shard-mb", type=float, default=8.0,
                     help="Target max MiB per output file (default 8, under HF's ~10 "
                          "MiB ceiling); rows are sliced on boundaries.")
+    ap.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR,
+                    help="Where fetched LeetCode pages are cached.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Write only reports/ (what would be dropped), not the data files.")
     args = ap.parse_args()
     splits = (args.only,) if args.only else SPLITS
+
+    records, reports = {}, {}
     for split in splits:
-        build(split, args.out, rate_delay=args.rate_delay, limit=args.limit,
-              shard_mb=args.shard_mb)
-    write_readme(args.out)
+        records[split], reports[split] = build_problems_hf(
+            split, cache_dir=args.cache_dir, rate_delay=args.rate_delay, limit=args.limit)
+    if "train" in reports and "test" in reports:
+        mark_overlap(reports["train"], reports["test"])
+    for split in splits:
+        records[split] = apply_drop_categories(split, records[split], reports[split])
+
+    report_dir = args.out / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    for split in splits:
+        (report_dir / f"{split}.json").write_text(json.dumps(reports[split], indent=1) + "\n")
+        if not args.dry_run:
+            build(split, records[split], args.out, shard_mb=args.shard_mb)
+    if not args.dry_run:
+        write_readme(args.out, reports)
+    (report_dir / "dropped.md").write_text(drop_list(reports))
+    summary = "\n\n".join(summarize(split, reports[split], len(LANGUAGES)) for split in splits)
+    (report_dir / "summary.txt").write_text(summary + "\n")
+    print(summary)
 
 
 # --- raw LeetCode row loading (prep) ----------------------------------------
-DATASET_NAME = "newfacade/LeetCodeDataset"
 
 
 @dataclass

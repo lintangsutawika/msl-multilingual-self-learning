@@ -26,19 +26,24 @@ DEFAULT_OUTPUT = Path("benchmarks/leetcode/tasks")
 
 
 def load_problems(dataset: Path) -> list[dict]:
+    # Split on newlines only: problem text can contain U+2028 and other
+    # characters that str.splitlines() also treats as line breaks.
     return [
         json.loads(line)
-        for line in dataset.read_text().splitlines()
+        for line in dataset.read_text().split("\n")
         if line.strip()
     ]
 
 
 def load_problems_hf_or_file(dataset: Path | None, split: str) -> list[dict]:
-    """Return problem rows: an explicit --dataset JSONL if given, else the
-    hosted neulab/leetcode dataset (pulled)."""
+    """Return problem rows: an explicit --dataset JSONL file, or a local
+    build_dataset.py output directory, if given; else the hosted
+    neulab/leetcode dataset (pulled)."""
+    from .dataset import load_problems_hf
+    if dataset is not None and dataset.is_dir():
+        return load_problems_hf(split, dataset=str(dataset))
     if dataset is not None:
         return load_problems(dataset)
-    from .dataset import load_problems_hf
     return load_problems_hf(split)
 
 
@@ -89,9 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Path to a pre-built execution JSONL. If omitted, problems are built "
-            "live from newfacade/LeetCodeDataset for the split (test for set "
-            "a1/a2/b, train for set train)."
+            "A flat per-(problem, language) JSONL, or a local build_dataset.py "
+            "output directory. If omitted, the split is pulled from the hosted "
+            "neulab/leetcode dataset (test for set a1/a2/b, train for set train)."
         ),
     )
 
@@ -217,20 +222,17 @@ def main() -> None:
                 f"Question ID(s) absent from selected dataset/set: {missing}"
             )
 
-    # --lang filters the flat per-(problem, language) rows.
-    if languages:
-        problems = [
-            problem
-            for problem in problems
-            if problem.get("language") in languages
-        ]
-
+    # --lang selects which flat per-(problem, language) rows become tasks; all
+    # language rows of a selected problem stay, because test filtering looks at
+    # every language's declared types (so the kept tests do not depend on --lang).
     problems.sort(
         key=lambda problem: int(problem["question_id"])
     )
 
     if args.limit is not None and args.limit >= 0:
-        problems = problems[: args.limit]
+        selected = [p for p in problems if p.get("language") in languages][: args.limit]
+        keep = {int(p["question_id"]) for p in selected}
+        problems = [p for p in problems if int(p["question_id"]) in keep]
 
     if output_dir.exists():
         raise SystemExit(
@@ -303,6 +305,7 @@ def main() -> None:
         output=output_dir,
         images=images,
         skip_unsupported=args.skip_unsupported,
+        languages=languages,
     )
 
     # Move prebuilt sifs into the task dir now that generation succeeded.

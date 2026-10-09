@@ -30,6 +30,8 @@
 #   QUIET            suppress harbor live renderer (default 1 under a batch).
 #   AGENT_TIMEOUT_MULT  agent timeout multiplier (default 6: 6 x 300s task timeout = 1800s trial budget).
 #   RESUME_FILTER_ERRORS  space-separated error types to retry on resume.
+#   RESUME_PASSES    resume the job this many more times after the first pass, while
+#                    vLLM is still up (default 0: one pass, as before).
 #   DELIBERATOR_BASE_URL  if set, skip local serve and eval against this endpoint.
 #   SERVE_CONFIG     per-model serve json (default configs/serve/<MODEL>.json).
 #   SERVE_READY_TRIES  /health poll budget (tries x 5s; default 180 ~ 15 min).
@@ -83,7 +85,20 @@ def emit(var, val):
         return
     print(f"{var}={shlex.quote(val)}")
 if isinstance(c.get("extra_args"), list):
-    emit("VLLM_ARGS_EXTRA", " ".join(str(a) for a in c["extra_args"]))
+    args = [str(a) for a in c["extra_args"]]
+    # SimpleCodeAgent sends no tools, and a tool-call parser rewrites the reply text
+    # (it drops the </think> that ends Qwen's reasoning), so serve it without one.
+    if "simple_code_agent" in os.environ.get("AGENT", ""):
+        kept, skip = [], False
+        for a in args:
+            if skip:
+                skip = False
+            elif a == "--tool-call-parser":
+                skip = True
+            elif a != "--enable-auto-tool-choice" and not a.startswith("--tool-call-parser="):
+                kept.append(a)
+        args = kept
+    emit("VLLM_ARGS_EXTRA", " ".join(args))
 if c.get("max_model_len"):
     emit("MAX_MODEL_LEN", str(c["max_model_len"]))
 PY
@@ -193,14 +208,24 @@ echo "================================================================"
 
 # Delegate to the eval runner. Run in the BACKGROUND and wait, so a scheduler TERM
 # reaches our trap while run.sh (exec'd into harbor) is still a killable child.
-TASK_PATH="${TASKS:-benchmarks/leetcode/tasks-b}" \
-MODEL_BASE_URL="${DELIBERATOR_BASE_URL}" MODEL_API_KEY="EMPTY" \
-MODEL="litellm_proxy/${MODEL}" \
-N_CONCURRENT="${N_CONCURRENT:-32}" \
-AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-6.0}" \
-RESUME_FILTER_ERRORS="${RESUME_FILTER_ERRORS:-}" \
-QUIET="${QUIET:-1}" \
-bash scripts/eval/run.sh &
-EVAL_PID=$!
-wait "${EVAL_PID}" || true
-echo "[eval] run.sh finished (exit $?)"
+# RESUME_PASSES (default 0) then resumes the job that many more times while vLLM is
+# still up, so trials that ended in a RESUME_FILTER_ERRORS error are re-run.
+run_eval() {
+    TASK_PATH="${TASKS:-benchmarks/leetcode/tasks-b}" \
+    MODEL_BASE_URL="${DELIBERATOR_BASE_URL}" MODEL_API_KEY="EMPTY" \
+    MODEL="litellm_proxy/${MODEL}" \
+    N_CONCURRENT="${N_CONCURRENT:-32}" \
+    AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-6.0}" \
+    RESUME_FILTER_ERRORS="${RESUME_FILTER_ERRORS:-}" \
+    QUIET="${QUIET:-1}" \
+    "$@" bash scripts/eval/run.sh &
+    EVAL_PID=$!
+    local status=0
+    wait "${EVAL_PID}" || status=$?
+    echo "[eval] run.sh finished (exit ${status})"
+}
+run_eval
+for _pass in $(seq 1 "${RESUME_PASSES:-0}"); do
+    echo "[eval] resume pass ${_pass}/${RESUME_PASSES}"
+    run_eval env RESUME=1
+done

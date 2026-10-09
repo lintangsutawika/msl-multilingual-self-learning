@@ -8,7 +8,6 @@ into the task. Mirrors material-harbor/matqna's adapter pattern.
 """
 from __future__ import annotations
 
-import ast
 import json
 import shutil
 import subprocess
@@ -16,6 +15,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from .hf_dataset.constraints import canonical_names
 from .runners import render_worker
 
 LANGUAGES = (
@@ -29,7 +29,6 @@ LANGUAGES = (
     "php",
     "ruby",
 )
-OMITTED_QUESTIONS = {3319: "Omitted pending tree transport support"}
 SOURCE_FILES = {
     "python": "solution.py",
     "cpp": "solution.cpp",
@@ -54,20 +53,6 @@ ADAPTERS = {
 }
 
 PKG = Path(__file__).parent
-
-
-def canonical_names(problem: dict[str, Any]) -> list[str]:
-    """Canonical parameter names for the shared Python judge."""
-    names = problem.get("metadata", {}).get("canonical_parameter_names")
-    if names is None:
-        names = [p["name"] for p in problem["interfaces"]["python"]["parameters"]]
-        for node in ast.walk(ast.parse(problem["canonical_tests"]["source"])):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "candidate":
-                if any(k.arg not in names for k in node.keywords):
-                    raise ValueError(
-                        "HF/Doocs parameter names differ; regenerate dataset to retain canonical_parameter_names"
-                    )
-    return names
 
 
 def _source_contract(interface: dict, language: str) -> str:
@@ -365,7 +350,7 @@ def generate(
 
     # Copy the per-language template into the new task.
     tpl = PKG / f"task-template-{language}"
-    shutil.copytree(tpl, task, dirs_exist_ok=False)
+    shutil.copytree(tpl, task, dirs_exist_ok=False, ignore=shutil.ignore_patterns("__pycache__"))
 
     # When a prebuilt sif supplies docker_image (e.g. --prebuild-sif), the image
     # already carries the full toolchain, so the task's environment/Dockerfile
@@ -440,7 +425,12 @@ def generate(
     )
 
     # Problem-specific verifier artifacts.
-    (task / "tests/config.json").write_text(json.dumps({"language": language, "parameter_names": names}))
+    (task / "tests/config.json").write_text(json.dumps({
+        "language": language,
+        "parameter_names": names,
+        "callable": interface["callable"],
+        "container": interface.get("container"),
+    }))
     (task / "tests/canonical_test.py").write_text(row["canonical_tests"]["source"])
 
     # Native runner/worker (unified: python -> worker.py, others -> runner.<lang>).
@@ -457,11 +447,15 @@ def generate_all(
     output: Path,
     images: dict[str, str] | None = None,
     skip_unsupported: bool = False,
+    languages: tuple[str, ...] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Generate one task per flat (problem, language) row, staging atomically.
 
-    Returns (exclusions, count). Aborts (raising) on unsupported transports
-    unless skip_unsupported, in which case they are recorded as exclusions.
+    The rows come from neulab/leetcode, whose tests were already cleaned when
+    the dataset was built (hf_dataset/build_dataset.py), so they are used as
+    they are. `languages` restricts the rows turned into tasks. Returns
+    (exclusions, count). Aborts (raising) on unsupported transports unless
+    skip_unsupported, in which case they are recorded as exclusions.
     """
     images = images or {}
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -477,13 +471,13 @@ def generate_all(
         staged.mkdir()
         for row in _tqdm(rows, total=len(rows), desc="generating tasks", unit="task"):
             lang = row["language"]
-            if row["question_id"] in OMITTED_QUESTIONS:
-                exclusions.append({"question_id": row["question_id"], "language": lang,
-                                   "reason": OMITTED_QUESTIONS[row["question_id"]]})
+            if languages is not None and lang not in languages:
                 continue
             try:
                 generate(row, staged, images.get(lang))
-            except NotImplementedError as exc:
+            # NotImplementedError: unsupported transport; ValueError: the dataset's
+            # canonical tests and native interface disagree (e.g. parameter counts).
+            except (NotImplementedError, ValueError) as exc:
                 if not skip_unsupported:
                     raise
                 exclusions.append({"question_id": row["question_id"], "language": lang, "reason": str(exc)})

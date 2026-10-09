@@ -20,6 +20,10 @@
 #                     per-model configs/sampling/<repo>.yaml is auto-selected by
 #                     MODEL when present, e.g. MODEL=Qwen/Qwen3.5-9B ->
 #                     configs/sampling/Qwen/Qwen3.5-9B.yaml).
+#                     With AGENT=...simple_code_agent:SimpleCodeAgent it is the agent's
+#                     prompt config instead (default configs/task/leetcode-simple-code-agent.yaml).
+#   SAMPLING_FILE    SimpleCodeAgent only: the model's sampling yaml (default
+#                     configs/sampling/<repo>.yaml, the file mini-swe-agent gets as CONFIG_FILE).
 #   JOB_NAME         harbor job name (default <dataset>_<model>-run-<RUN>; deterministic
 #                     so resume works across chunks AND RUN=0,1,... gives repeat runs).
 #   JOBS_DIR         output directory (default jobs)
@@ -57,6 +61,14 @@ MODEL_API_KEY="${MODEL_API_KEY:-dummy}"
 # so per-model sampling configs resolve by the real repo path.
 _MODEL_BARE="${MODEL#openai/}"
 _MODEL_BARE="${_MODEL_BARE#litellm_proxy/}"
+# SimpleCodeAgent takes two files: its prompts (CONFIG_FILE) and the same per-model
+# sampling yaml mini-swe-agent gets (SAMPLING_FILE). mini-swe-agent is unchanged below.
+SAMPLING_FILE="${SAMPLING_FILE:-}"
+if [[ "${AGENT:-}" == *simple_code_agent* ]]; then
+    SAMPLING_FILE="${SAMPLING_FILE:-configs/sampling/${_MODEL_BARE}.yaml}"
+    CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode-simple-code-agent.yaml}"
+    [ -f "${SAMPLING_FILE}" ] || { echo "ERROR: sampling file not found: ${SAMPLING_FILE}" >&2; exit 2; }
+fi
 # Agent scaffold comes from configs/task/leetcode.yaml (system prompt, instance
 # template, environment, observation/format templates). Per-model sampling knobs live
 # in configs/sampling/<repo>.yaml (model.model_kwargs: max_tokens, temperature, ...).
@@ -69,9 +81,10 @@ _MODEL_BARE="${_MODEL_BARE#litellm_proxy/}"
 #   MERGED_CONFIG    -> <CONFIG_FILE> with SAMPLING_CONFIG deep-merged onto it
 # An explicit CONFIG_FILE still wins as the scaffold; set SAMPLING_CONFIG to a custom
 # sampling yaml (or empty to skip merging).
+# (SimpleCodeAgent already has CONFIG_FILE and SAMPLING_FILE above, so it skips the merge.)
 CONFIG_FILE="${CONFIG_FILE:-configs/task/leetcode.yaml}"
 SAMPLING_CONFIG="${SAMPLING_CONFIG:-configs/sampling/${_MODEL_BARE}.yaml}"
-if [ -n "${SAMPLING_CONFIG}" ] && [ -f "${SAMPLING_CONFIG}" ]; then
+if [ -z "${SAMPLING_FILE}" ] && [ -n "${SAMPLING_CONFIG}" ] && [ -f "${SAMPLING_CONFIG}" ]; then
     _MERGED="${CONFIG_FILE%.yaml}.merged.yaml"
     uv run python - "${CONFIG_FILE}" "${SAMPLING_CONFIG}" "${_MERGED}" <<'PY'
 import sys, yaml
@@ -101,7 +114,11 @@ _DATASET_SLUG="${TASK_PATH%/}"
 _DATASET_SLUG="${_DATASET_SLUG#./}"
 _DATASET_SLUG="${_DATASET_SLUG#/}"
 _DATASET_SLUG="${_DATASET_SLUG//\//--}"
-JOB_NAME="${JOB_NAME:-${_DATASET_SLUG}_${_MODEL_BARE//\//--}-run-${RUN}}"
+# SimpleCodeAgent jobs carry the agent in their name, so they never resume a
+# mini-swe-agent job on the same tasks and model (whose name is unchanged).
+_AGENT_SLUG=""
+[[ "${AGENT:-}" == *simple_code_agent* ]] && _AGENT_SLUG="simple-code-agent_"
+JOB_NAME="${JOB_NAME:-${_DATASET_SLUG}_${_AGENT_SLUG}${_MODEL_BARE//\//--}-run-${RUN}}"
 JOBS_DIR="${JOBS_DIR:-jobs}"
 N_CONCURRENT="${N_CONCURRENT:-1}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -142,6 +159,9 @@ if [ "${RESUME}" = "1" ] || { [ "${RESUME}" = "auto" ] && [ -f "${JOB_DIR}/confi
     echo "RESUME  job=${JOB_NAME}  dir=${JOB_DIR}"
     echo "harbor: ${HARBOR_CMD[0]}"
     echo "retry-error-types=${RESUME_FILTER_ERRORS:-<harbor default: CancelledError>}"
+    # Harbor saves a resumed trial's secrets as "[REDACTED]" but plans with "****", so
+    # the next resume would refuse the job; restore the planned value first.
+    python3 scripts/eval/fix_redacted_key.py "${JOB_DIR}"
     echo "+ ${HARBOR_CMD[*]} ${RESUME_ARGS[*]}"
     exec "${HARBOR_CMD[@]}" "${RESUME_ARGS[@]}"
 fi
@@ -163,6 +183,7 @@ ARGS=(
     --agent-timeout-multiplier "${AGENT_TIMEOUT_MULT}"
     -y
 )
+[ -n "${SAMPLING_FILE}" ] && ARGS+=( --ak "sampling_file=${SAMPLING_FILE}" )
 [ -n "${MEMORY_MB}" ] && ARGS+=( --ek "override_memory_mb=${MEMORY_MB}" )
 [ -n "${MEMORY_ENFORCEMENT}" ] && ARGS+=( --ek "memory_enforcement_policy=${MEMORY_ENFORCEMENT}" )
 [ "${QUIET}" = "1" ] && ARGS+=( --quiet )
@@ -170,6 +191,6 @@ ARGS=(
 
 echo "task:  ${TASK_PATH}"
 echo "harbor: ${HARBOR_CMD[0]}"
-echo "model: ${MODEL}  base_url: ${MODEL_BASE_URL}  config: ${CONFIG_FILE}"
+echo "model: ${MODEL}  base_url: ${MODEL_BASE_URL}  config: ${CONFIG_FILE}${SAMPLING_FILE:+  sampling: ${SAMPLING_FILE}}"
 echo "+ ${HARBOR_CMD[*]} ${ARGS[*]}"
 exec "${HARBOR_CMD[@]}" "${ARGS[@]}"
