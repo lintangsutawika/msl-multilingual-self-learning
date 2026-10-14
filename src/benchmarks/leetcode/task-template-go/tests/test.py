@@ -41,6 +41,12 @@ def _load_source(language):
                 return sub["code"]
         except Exception:
             pass
+    art = Path(os.environ.get("LEETCODE_ARTIFACTS", "/logs/artifacts"))
+    art_src = art / FILES[language]
+    if art_src.exists() and art_src.read_text().strip():
+        code = art_src.read_text().strip()
+        target.write_text(json.dumps({"language": language, "code": code}))
+        return code
     src = WORKSPACE / FILES[language]
     if not src.exists():
         raise ValueError(f"source not found: {src}")
@@ -57,6 +63,22 @@ def _load_source(language):
 def prepare(language):
     code = _load_source(language)
     (WORKSPACE / FILES[language]).write_text(code)
+    # --- Grader compatibility: normalize go (package solution->main) and rust
+    # (strip redundant struct Solution;) so captured solutions compile against
+    # the bundled runner.
+    if language == "go":
+        _sp = WORKSPACE / "solution.go"
+        _t = _sp.read_text()
+        if _t.startswith("package solution\n") or _t.startswith("package solution\r\n"):
+            _sp.write_text("package main" + _t[len("package solution"):])
+        elif _t.startswith("package solution;"):
+            _sp.write_text("package main" + _t[len("package solution;"):])
+    elif language == "rust":
+        _sp = WORKSPACE / "solution.rs"
+        _t = _sp.read_text()
+        _lines = _t.splitlines()
+        if _lines and _lines[0].strip() == "struct Solution;":
+            _sp.write_text("\n".join(_lines[1:]).lstrip())
     worker = ADAPTERS / {
         "python": "worker.py",
         "javascript": "runner.js",
