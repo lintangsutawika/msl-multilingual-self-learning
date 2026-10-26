@@ -16,6 +16,9 @@ dependencies = [
     # FUSE-restricted clusters. Not needed for ENV=docker/modal. Its own pyproject
     # requires harbor>=0.22,<0.23, satisfied by the harbor git pin below.
     "harbor-singularity-hpc",
+    # Sail remote sandboxes (sail.harbor:SailboxEnvironment) for Harbor
+    # tasks in Sailboxes (CPU-only; no GPUs). Set SAIL_API_KEY.
+    "sail",
     "datasets",
     "vllm>=0.28.0",
     "requests>=2.34.2",
