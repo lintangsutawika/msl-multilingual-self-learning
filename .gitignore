@@ -276,3 +276,6 @@ benchmarks/leetcode/data/interface_parse_failures.json
 
 # Weights & Biases local run data
 wandb/
+
+# Generated MLE-Bench Harbor task templates (build output)
+harbor_tasks/
