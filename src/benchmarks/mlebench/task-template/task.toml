@@ -1,0 +1,27 @@
+schema_version = "1.1"
+# MLE-Bench task (Kaggle-style): build a model, submit predictions.csv, graded
+# on the competition metric. Data is prepared inside the sandbox at runtime.
+
+[task]
+name = "mlebench/{comp_id}"
+description = "{comp_name} — build a model and submit predictions.csv."
+keywords = ["mle-bench", "kaggle", "regression", "classification", "tabular"]
+
+[metadata]
+difficulty = "{difficulty}"
+category = "mle-bench"
+source = "mlebench"
+competition_id = "{comp_id}"
+
+[agent]
+timeout_sec = 14400.0
+
+[verifier]
+timeout_sec = 3600.0
+env = { KAGGLE_USERNAME = "${KAGGLE_USERNAME}", KAGGLE_KEY = "${KAGGLE_KEY}", SAIL_API_KEY = "${SAIL_API_KEY}" }
+
+[environment]
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+network_mode = "public"
