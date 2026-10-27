@@ -19,17 +19,57 @@ from openhands.sdk import (
     get_logger,
 )
 from openhands.sdk.context import Skill
-from openhands.sdk.event import (
-    ActionEvent,
-    MessageEvent,
-    ObservationEvent,
-    TokenEvent,
-)
-from openhands.tools.file_editor import FileEditorTool
-from openhands.tools.task_tracker import TaskTrackerTool
-from openhands.tools.terminal import TerminalTool
+# decided by the setup made per problem. The DOMAIN rule for MLE-Bench lives in
+# ``src.episode.mlebench`` (episode = validate-to-validate span). This runner
+# only needs to *call* the installed checker per event; it never hardcodes what
+# an episode is.
+#
+# A setup installs a checker via ``EPISODE_CHECKER_MODULE`` (a ``module:callable``;
+# callable takes ``(event, state) -> bool`` and returns True when the event ENDS
+# an episode), or ``EPISODE_CHECKER_MODULE=`` (empty string) for the generic default
+# (one episode per tool-action round). With the env var unset, this harness
+# defaults to the MLE-Bench domain rule (``src.episode.mlebench``).
+#
+# On a True return, the poller seals the episode with an ``episode_end`` line in
+# rollout.jsonl carrying the episode span (start_event -> end_event) so harvesters
+# splice episodes + their per-episode reward (src.episode.mlebench.compute_episode_reward).
 
-logger = get_logger(__name__)
+
+def default_check_episode_completion(event: Any, state: dict) -> bool:
+    """One episode per tool-action round (generic default).
+
+    Ends an episode on every ActionEvent so a generic run yields per-step
+    episodes. Override per problem for coarser/domain boundaries (e.g.
+    validate-to-validate for MLE-Bench)."""
+    if isinstance(event, ActionEvent):
+        return True
+    return False
+
+
+def _load_episode_checker() -> Any:
+    """Resolve the installed episode-completion checker from env.
+
+    ``EPISODE_CHECKER_MODULE=``   -> empty string: use default (per-tool-action).
+    ``EPISODE_CHECKER_MODULE=path:attr`` -> import path:attr (the setup's hook).
+    Unset -> MLE-Bench domain rule (``src.episode.mlebench``).
+    """
+    spec = os.environ.get("EPISODE_CHECKER_MODULE")
+    if spec == "":
+        return default_check_episode_completion
+    if spec:
+        module_path, _, attr = spec.partition(":")
+        import importlib
+
+        mod = importlib.import_module(module_path)
+        return getattr(mod, attr or "check_episode_completion")
+    # Default for this harness deployment (MLE-Bench evals): the domain episode rule.
+    import importlib
+
+    mod = importlib.import_module("src.episode.mlebench")
+    return mod.check_episode_completion
+
+
+CHECK_EPISODE_COMPLETION = _load_episode_checker()
 
 
 def load_skill_from_file(skill_path: Path) -> Skill | None:
@@ -339,13 +379,37 @@ def main():
 
     def _poller():
         nonlocal _seen
+        # Per-episode accumulator + first-event index of the current episode, so
+        # harvesters can splice episode spans from the live stream.
+        episode_state: dict[str, Any] = {"episode_index": 0, "start_event": 0}
         while not _stop.is_set():
             try:
                 n = len(conversation.state.events)
                 while _seen < n:
-                    line = json.dumps(_serialize_event(conversation.state.events[_seen]))
+                    ev = conversation.state.events[_seen]
+                    line = json.dumps(_serialize_event(ev))
                     with open(rollout_path, "a") as f:
                         f.write(line + "\n")
+                    # Ask the installed checker whether this event ENDS an
+                    # episode. If so, seal the span with an episode_end line.
+                    try:
+                        if CHECK_EPISODE_COMPLETION(ev, episode_state):
+                            end_line = json.dumps(
+                                {
+                                    "ts": getattr(ev, "timestamp", None) or time.time(),
+                                    "type": "episode_end",
+                                    "episode_index": episode_state["episode_index"],
+                                    "start_event": episode_state["start_event"],
+                                    "end_event": _seen,
+                                    "state": episode_state,
+                                }
+                            )
+                            with open(rollout_path, "a") as f:
+                                f.write(end_line + "\n")
+                            episode_state["episode_index"] += 1
+                            episode_state["start_event"] = _seen + 1
+                    except Exception:
+                        pass
                     _seen += 1
             except Exception:
                 pass
