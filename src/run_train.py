@@ -16,6 +16,7 @@ Qwen3.5-9B is pre-converted (§2): we ``--skip-prepare`` + ``--ref-load`` the ex
 """
 
 import os
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -33,7 +34,9 @@ class ScriptArgs(U.ExecuteTrainConfig):
     mode: Literal["normal", "debug_rollout_only"] = "normal"
     run_id: str = U.create_run_id()
     megatron_model_type: str = "qwen3.5-9B"
-    num_gpus_per_node: int = 8
+    # Total GPUs available for rollout (train GPUs added separately in normal mode).
+    # Env-driven so a smoke can run on fewer GPUs than the 8-GPU full config.
+    num_gpus_per_node: int = int(os.environ.get("NUM_GPUS", "8"))
     megatron_path: str = "/root/Megatron-LM"
 
     # Paths -- Qwen3.5-9B pre-converted, no runtime convert (--skip-prepare + ref-load).
@@ -41,11 +44,15 @@ class ScriptArgs(U.ExecuteTrainConfig):
     base_dir: str = "/root"
     model_name: str = "qwen3.5-9B"
     hf_checkpoint: str = "Qwen/Qwen3.5-9B"
-    ref_load: str = "/home/aci18914wh/mho-model-harness-optimization/runs_output/qwen3.5-9b_mlebench_episodes/checkpoints/qwen3.5-9B_torch_dist"
-    save_dir: str = "/home/aci18914wh/mho-model-harness-optimization/runs_output/qwen3.5-9b_mlebench_episodes/checkpoints"
-    prompt_data: str = (
-        "/home/aci18914wh/mho-model-harness-optimization/mlebench_training_episodes/seed.jsonl"
+    # MSL_REPO drives repo paths (ref_load/save_dir/seed). No hardcoded user path:
+    # default to the repo root derived from this module's location (src/run_train.py
+    # -> repo root). Override via MSL_REPO env.
+    _msl_repo: str = os.environ.get(
+        "MSL_REPO", str(Path(__file__).resolve().parents[1])
     )
+    ref_load: str = f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/checkpoints/qwen3.5-9B_torch_dist"
+    save_dir: str = f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/checkpoints"
+    prompt_data: str = f"{_msl_repo}/runs/seed/seed.jsonl"
 
     # Training settings -- 4 tasks x 4 samples = 16 episode per async batch.
     max_seq_len: int = 32768
@@ -56,21 +63,32 @@ class ScriptArgs(U.ExecuteTrainConfig):
     save_interval: int = 10
     save_hf: str = os.environ.get(
         "MILES_SAVE_HF",
-        "/home/aci18914wh/mho-model-harness-optimization/runs_output/qwen3.5-9b_mlebench_episodes/checkpoints/hf/step_{}",
+        f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/checkpoints/hf/step_{{}}",
     )
 
     # Harbor settings (see harbor_agent_shim.py + run_training.py for semantics).
-    harbor_env_type: str = os.environ.get("HARBOR_ENV_TYPE", "singularity")
+    harbor_env_type: str = os.environ.get("HARBOR_ENV_TYPE", "sail")
     harbor_env_kwargs: str = os.environ.get("HARBOR_ENV_KWARGS", "")
     harbor_tasks_dir: str = os.environ.get(
         "HARBOR_TASKS_DIR",
-        "/home/aci18914wh/mho-model-harness-optimization/mlebench_training_episodes",
+        # Task dirs (per instance_id) live under harbor_tasks/mlebench-low/<comp>/,
+        # NOT the seed dir. instance_id in seed.jsonl = <comp>.
+        f"{_msl_repo}/harbor_tasks/mlebench-low",
     )
-    harbor_trials_dir: str = os.environ.get("HARBOR_TRIALS_DIR", "/tmp/harbor_trials")
+    # Trials dir on SHARED FS (not node-local /tmp) so episode/rollout data is
+    # readable from the login node. Override via HARBOR_TRIALS_DIR.
+    harbor_trials_dir: str = os.environ.get(
+        "HARBOR_TRIALS_DIR",
+        f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/harbor_trials",
+    )
     agent_model_name: str = os.environ.get("AGENT_MODEL_NAME", "qwen3.5-9B")
     agent_timeout: int = int(os.environ.get("AGENT_TIMEOUT", "5400"))
 
     modal_config_file: str = os.environ.get("MODAL_CONFIG_PATH", "")
+    router_external_host: str = os.environ.get(
+        "MILES_ROUTER_EXTERNAL_HOST", socket.gethostname()
+    )
+    miles_host_ip: str = os.environ.get("MILES_HOST_IP", "")
     wandb_key: str = os.environ.get("WANDB_KEY", os.environ.get("WANDB_API_KEY", ""))
     wandb_project: str = os.environ.get("WANDB_PROJECT", "mho-harness")
     wandb_run_name: str = "qwen3.5-9b-mlebench-openhands"
@@ -123,8 +141,21 @@ def execute(args: ScriptArgs):
         "--overlap-cpu-optimizer-d2h-h2d "
         "--use-precision-aware-optimizer "
     )
-    grpo_args = (
-        "--advantage-estimator grpo "
+    # PPO with critic: our method needs per-episode (temporal) credit assignment for the
+    # binary-improvement intermediate rewards + lifelong/long-horizon learning. GRPO
+    # (group-normalized terminal rewards) is structurally wrong for per-episode branches.
+    # PPO: --advantage-estimator ppo AUTO-enables the critic (use_critic =
+    # advantage_estimator == "ppo", arguments.py:3294) -- do NOT pass --use-critic
+    # (not a registered CLI arg in this build). --offload-train keeps the critic
+    # within GPU memory (with --optimizer-cpu-offload).
+    ppo_args = (
+        "--advantage-estimator ppo "
+        "--offload-train "
+        # Async PPO: rollouts are generated before the weight update while log probs
+        # are recomputed by the current actor by default; Miles requires a behavior-policy
+        # correction. --use-rollout-logprobs uses the rollout engine's log probs as the
+        # ratio denominator (our agent captures them via logprobs/return_token_ids).
+        "--use-rollout-logprobs "
         "--use-kl-loss "
         "--kl-loss-coef 0.01 "
         "--kl-loss-type low_var_kl "
@@ -153,19 +184,28 @@ def execute(args: ScriptArgs):
         "--custom-agent-function-path harbor_agent_function.run",
         "--custom-agent-function-path src.harness.harbor_agent_shim.run",
     )
+    # --rollout-num-gpus derives from the (env-set) total GPU count: in normal mode
+    # reserve 2 for the TP=2 trainer; in debug-rollout-only use all GPUs for rollout.
+    _rollout_gpus = (
+        args.num_gpus_per_node
+        if args.mode == "debug_rollout_only"
+        else max(args.num_gpus_per_node - 2, 1)
+    )
     misc_args = (
         "--attention-dropout 0.0 "
         "--hidden-dropout 0.0 "
         "--accumulate-allreduce-grads-in-fp32 "
         "--attention-softmax-in-fp32 "
         "--attention-backend flash "
+        # In-flight weight update: with LoRA rollout + distributed (non-colocate) engines,
+        # the WeightUpdater requires --megatron-to-hf-mode bridge to sync updated adapters
+        # back to the rollout fleet (megatron_utils/actor.py asserts this).
+        "--megatron-to-hf-mode bridge "
         "--actor-num-nodes 1 "
         "--actor-num-gpus-per-node 2 "
-        "--rollout-num-gpus 6 "
+        f"--rollout-num-gpus {_rollout_gpus} "
     )
     debug_args = "--debug-rollout-only " if args.mode == "debug_rollout_only" else ""
-    # In debug-rollout-only mode we do not need the 2 train GPUs; free them so a
-    # 1-2 GPU smoke can validate the rollout/OpenHands path without a full 8-GPU alloc.
     if args.mode == "debug_rollout_only":
         misc_args = misc_args.replace("--actor-num-gpus-per-node 2 ", "")
     wandb_args = ""
@@ -173,7 +213,7 @@ def execute(args: ScriptArgs):
         wandb_args = f"--use-wandb --wandb-project {args.wandb_project} --wandb-group {args.wandb_run_name} --wandb-key {args.wandb_key} "
 
     train_args = (
-        f"{ckpt_args}{rollout_args}{optimizer_args}{grpo_args}{wandb_args}"
+        f"{ckpt_args}{rollout_args}{optimizer_args}{ppo_args}{wandb_args}"
         f"{perf_args}{sglang_args}{agent_args}{misc_args}{debug_args}"
     )
     # The rollout worker must import our OpenHands harness: src/harness/harbor_agent_shim
