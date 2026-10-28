@@ -31,7 +31,10 @@ _RUNNER = Path(__file__).parent / "openhands_sdk_runner.py"
 class LiveRolloutOpenHandsSDK(OpenHandsSDK):
     """OpenHands SDK agent that captures ongoing rollouts + per-token logprobs."""
 
-    name = "openhands-sdk-live"
+    # NOTE: no `name = "..."` class attr here — the base `BaseInstalledAgent` defines
+    # `name()` as a callable (used by `to_agent_info`), and a string attr would shadow
+    # it -> `TypeError: 'str' object is not callable`. The agent registers under its
+    # AgentName via the factory swap (openhands-sdk -> this class).
 
     @override
     async def configure(self, environment: BaseEnvironment) -> None:
@@ -83,6 +86,18 @@ class LiveRolloutOpenHandsSDK(OpenHandsSDK):
         env["TRAJECTORY_PATH"] = f"/logs/agent/{self._TRAJECTORY_FILENAME}"
         env["LOAD_SKILLS"] = "1" if self._load_skills else "0"
         env["SKILL_PATHS"] = ":".join(self._skill_paths)
+        # SDK-native persistence/resume: a stable persistence dir + conversation_id lets
+        # the SDK save/restore the full conversation state so a restarted trial resumes
+        # from its prior trajectory. Per-trial dir on shared FS; stable id per trial.
+        _trials_dir = self._get_env("HARBOR_TRIALS_DIR")
+        _persist = self._get_env("PERSISTENCE_DIR")
+        if _persist:
+            env["PERSISTENCE_DIR"] = _persist
+        elif _trials_dir:
+            env["PERSISTENCE_DIR"] = f"{_trials_dir}/conversations"
+        _conv_id = self._get_env("CONVERSATION_ID")
+        if _conv_id:
+            env["CONVERSATION_ID"] = _conv_id
 
         if self.mcp_servers:
             mcp_list: list[dict[str, str | list[str]]] = []
@@ -127,3 +142,13 @@ class LiveRolloutOpenHandsSDK(OpenHandsSDK):
 
 # Alias for the factory swap.
 OpenHandsSDKLive = LiveRolloutOpenHandsSDK
+
+
+# Arm the AgentFactory swap on import (mirrors MHO's micro_swe_agent.py): make
+# AgentName.OPENHANDS_SDK resolve to this class so harbor "-a openhands-sdk" (eval)
+# and MILES's in-process agent-name lookup use LiveRolloutOpenHandsSDK. Importing
+# this module arms it; idempotent.
+from .backend import _install_agent_swap  # noqa: E402
+
+_install_agent_swap()
+

@@ -1,9 +1,13 @@
-"""Backend wiring: swap the OpenHands-SDK agent for our live-rollout subclass +
-point it at MILES's served model. Import this before harbor resolves agents.
+"""Backend wiring: swap the OpenHands-SDK agent for our live-rollout subclass.
 
-Mirrors MILES's ``MicroSweAgent`` factory-swap: we do NOT patch harbor's
-site-packages; we override ``AgentFactory._AGENT_MAP[OPENHANDS_SDK]`` at runtime so
-``-a openhands-sdk`` / ``AgentName.OPENHANDS_SDK`` resolves to our class.
+Mirrors MHO's ``MicroSweAgent`` factory-swap (no sitecustomize, no site-packages
+patch): we repoint ``AgentFactory._AGENT_MAP[AgentName.OPENHANDS_SDK]`` at our
+``LiveRolloutOpenHandsSDK`` so harbor resolves ``-a openhands-sdk`` to it.
+
+The swap is ARMED by explicitly importing an entrypoint that calls
+:func:`_install_agent_swap` (e.g. ``src.harness.your_openhands_agent`` does it at
+module import). This mirrors MHO's ``micro_swe_agent.py`` pattern -- importing the
+module arms the swap once, idempotently.
 """
 
 import os
@@ -15,11 +19,14 @@ from harbor.models.agent.name import AgentName
 _OUR_AGENT_IMPORT = "src.harness.your_openhands_agent:LiveRolloutOpenHandsSDK"
 
 
-def _apply_factory_swap() -> None:
+def _install_agent_swap() -> None:
+    """Repoint ``AgentName.OPENHANDS_SDK`` at our LiveRolloutOpenHandsSDK (idempotent)."""
+    try:
+        if AgentFactory._AGENT_MAP[AgentName.OPENHANDS_SDK].endswith("LiveRolloutOpenHandsSDK"):
+            return  # already swapped
+    except (KeyError, AttributeError):
+        pass
     AgentFactory._AGENT_MAP[AgentName.OPENHANDS_SDK] = _OUR_AGENT_IMPORT
-
-
-_apply_factory_swap()
 
 
 def mle_llm_env() -> dict[str, str]:

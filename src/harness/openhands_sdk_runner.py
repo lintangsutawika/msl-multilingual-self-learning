@@ -323,6 +323,18 @@ def main():
     if max_iter_raw:
         conv_kwargs["max_iteration_per_run"] = int(max_iter_raw)
         logger.debug(f"Max iterations per run: {max_iter_raw}")
+    # SDK-native persistence/resume: a stable persistence_dir + conversation_id lets the
+    # SDK save the full conversation state (message history, tool outputs, workspace) on
+    # run() and restore it on a later run with the same id -- the agent then continues
+    # from its prior trajectory instead of restarting. Set PERSISTENCE_DIR (shared FS)
+    # + a fixed CONVERSATION_ID to enable; on resume reuse both (same id -> deserialize).
+    persistence_dir = os.environ.get("PERSISTENCE_DIR", "")
+    conversation_id = os.environ.get("CONVERSATION_ID", "")
+    if persistence_dir:
+        conv_kwargs["persistence_dir"] = persistence_dir
+        if conversation_id:
+            conv_kwargs["conversation_id"] = conversation_id
+        print(f"[resume] persistence_dir={persistence_dir} conversation_id={conversation_id or '(new)'}")
     conversation = Conversation(**conv_kwargs)
 
     print(f"Starting agent with instruction: {args.instruction[:200]}...")
