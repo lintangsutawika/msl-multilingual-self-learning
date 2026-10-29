@@ -146,10 +146,18 @@ def execute(args: ScriptArgs):
     # (group-normalized terminal rewards) is structurally wrong for per-episode branches.
     # PPO: --advantage-estimator ppo AUTO-enables the critic (use_critic =
     # advantage_estimator == "ppo", arguments.py:3294) -- do NOT pass --use-critic
-    # (not a registered CLI arg in this build). --offload-train keeps the critic
-    # within GPU memory (with --optimizer-cpu-offload).
+    # (not a registered CLI arg in this build).    # within GPU memory (with --optimizer-cpu-offload).
     ppo_args = (
         "--advantage-estimator ppo "
+        # Critic must load from the HF checkpoint (not the actor megatron torch_dist):
+        # _load_checkpoint_hf hides the critic value head via bridge mode (Megatron
+        # torch_dist load would strict-fail on output_layer.weight shape). See
+        # checkpoint.py:_hide_critic_value_head_from_hf_load.
+        f"--critic-load {args.hf_checkpoint} "
+        "--offload-train "
+        # --offload-train holds actor/critic in CPU RAM (critic fits). TorchMemorySaver
+        # (used for offload) REQUIRES the allocator WITHOUT expandable_segments; we set
+        # PYTORCH_CUDA_ALLOC_CONF below to the non-expandable value (Miles docs).
         "--offload-train "
         # Async PPO: rollouts are generated before the weight update while log probs
         # are recomputed by the current actor by default; Miles requires a behavior-policy
@@ -173,7 +181,12 @@ def execute(args: ScriptArgs):
     )
     sglang_args = (
         "--rollout-num-gpus-per-engine 1 "
-        "--sglang-mem-fraction-static 0.7 "
+        # MILES-recommended external-engine rollout: point the agents at an externally
+        # reachable SGLang engine (our relay-served model) instead of the in-container
+        # session server -- avoids the host/container bridge reachability problem.
+        + (f"--rollout-external --rollout-external-engine-addrs {os.environ.get('MILES_ROLLOUT_EXTERNAL_URL','')} "
+           if os.environ.get('MILES_ROLLOUT_EXTERNAL_URL') else "")
+        + "--sglang-mem-fraction-static 0.7 "
         "--sglang-tool-call-parser qwen3_coder "
         "--sglang-reasoning-parser qwen3 "
         "--sglang-router-port 31000 "
@@ -227,6 +240,9 @@ def execute(args: ScriptArgs):
         # Our OpenHands harness knobs on the rollout worker:
         "AGENT_MODEL_NAME": args.agent_model_name,
         "LITELLM_EXTRA_BODY": '{"return_token_ids": true, "logprobs": true}',
+        # TorchMemorySaver (offload-train) breaks under expandable_segments; use the
+        # documented non-expandable allocator (Miles: run_glm52_lora_tb2_daytona.py).
+        "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.8,max_split_size_mb:512",
         "EPISODE_CHECKER_MODULE": "src.episode.mlebench",
     }
     U.execute_train(
