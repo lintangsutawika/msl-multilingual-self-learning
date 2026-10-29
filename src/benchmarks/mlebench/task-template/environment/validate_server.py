@@ -5,14 +5,11 @@ SUBMISSION = "/workspace/predictions.csv"
 SCORE_LOG = "/logs/verifier/validation_scores.jsonl"
 COMPETITION = "{comp_id}"
 
-# Prepare the competition data ONCE at server start (mlebench prepare is heavy
-# and must not re-run per submission; concurrent prepares spawn runaway procs).
-_PREPARED = False
+# Data is BAKED into the image + placed by startup.sh at the mlebench registry
+# paths -- no runtime `mlebench prepare` / Kaggle needed. Placeholder for parity.
+_PREPARED = True
 def _ensure_prepared() -> None:
-    global _PREPARED
-    if not _PREPARED:
-        subprocess.run(["mlebench", "prepare", "-c", COMPETITION], check=True, capture_output=True)
-        _PREPARED = True
+    return
 
 def grade() -> float:
     os.environ.setdefault("KAGGLE_CONFIG_DIR", "/root/.kaggle")
@@ -21,7 +18,7 @@ def grade() -> float:
         subs = f"{work}/subs.jsonl"
         with open(subs, "w") as f:
             f.write(json.dumps({"competition_id": COMPETITION, "submission_path": SUBMISSION}) + "\n")
-        r = subprocess.run(["mlebench", "grade", subs, "--output-dir", f"{work}/out"], capture_output=True, text=True)
+        r = subprocess.run(["mlebench", "grade", "--submission", subs, "--output-dir", f"{work}/out"], capture_output=True, text=True)
         g = glob.glob(f"{work}/out/*grading_report*.json")
         if g:
             rep = json.load(open(g[0]))

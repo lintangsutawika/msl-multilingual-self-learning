@@ -26,7 +26,7 @@ def grade(submission_path: str) -> float:
             f.write(json.dumps({"competition_id": COMPETITION,
                                 "submission_path": submission_path}) + "\n")
         r = subprocess.run(
-            ["mlebench", "grade", subs, "--output-dir", f"{work}/out"],
+            ["mlebench", "grade", "--submission", subs, "--output-dir", f"{work}/out"],
             capture_output=True, text=True,
         )
         g = glob.glob(f"{work}/out/*grading_report*.json")

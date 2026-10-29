@@ -1,30 +1,34 @@
 #!/usr/bin/env bash
-# Run at Sailbox/container start (Dockerfile CMD). Prepares the competition data
-# once so the agent + validate server never need to trigger `mlebench prepare`
-# at runtime, then starts the validate server and keeps the box alive.
+# Run at Sailbox/container start (Dockerfile CMD). Data is BAKED into the image
+# (/workspace/{private,public,leaderboard.csv}); place it where mlebench grade reads
+# them -- NO runtime Kaggle download/prepare -- then start the validate server.
 set -euo pipefail
 COMPETITION="{comp_id}"
 
-# 1. Neutralize Kaggle's interactive rule-acceptance prompts (headless -> EOF).
+# 1. Neutralize Kaggle's interactive rule-acceptance prompts (harmless no-op now).
 python3 /workspace/neutralize_rules.py
 
-# 2. Prepare the competition data (Kaggle creds + accepts rules), then expose the
-#    agent-facing splits at a clean, stable path: /workspace/public/.
-echo "[startup] preparing $COMPETITION ..."
-mlebench prepare -c "$COMPETITION"
-echo "[startup] prepared $COMPETITION"
-echo "[startup] exposing prepared/public at /workspace/public ..."
-rm -rf /workspace/public && mkdir -p /workspace/public
-python3 - <<PY
+# 2. Place baked data at the mlebench registry paths + expose /workspace/public.
+echo "[startup] placing baked data for $COMPETITION (no Kaggle)"
+python3 - <<'PY'
 from mlebench.registry import registry
 import shutil, pathlib
 comp = registry.get_competition("$COMPETITION")
-src = pathlib.Path(comp.public_dir)
-dst = pathlib.Path("/workspace/public")
-shutil.copytree(src, dst, dirs_exist_ok=True)
-print("copied", src, "->", dst)
+pub = comp.public_dir
+priv = comp.private_dir
+lb = comp.leaderboard
+lb.parent.mkdir(parents=True, exist_ok=True)
+if pathlib.Path('/workspace/private').exists():
+    priv.mkdir(parents=True, exist_ok=True)
+    shutil.copytree('/workspace/private', priv, dirs_exist_ok=True)
+if pathlib.Path('/workspace/public').exists():
+    pub.mkdir(parents=True, exist_ok=True)
+    shutil.copytree('/workspace/public', pub, dirs_exist_ok=True)
+if pathlib.Path('/workspace/leaderboard.csv').exists():
+    shutil.copy('/workspace/leaderboard.csv', lb)
+print('[startup] baked private/public/leaderboard placed (no Kaggle)')
 PY
-echo "[startup] public data at /workspace/public: $(ls /workspace/public)"
+echo "[startup] public data at /workspace/public: $(ls /workspace/public 2>/dev/null)"
 
 # 3. Start the validate server in the background.
 python3 /workspace/validate_server.py &
