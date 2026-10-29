@@ -1,5 +1,5 @@
 """
-Node-side bridge for the Modal reverse relay (harbor/relay/modal_relay.py).
+Node-side bridge for the Modal reverse relay (harbor/relay/public_api.py).
 
 Runs on the vLLM node (same Slurm job as the server). Dials OUT to the relay's
 WebSocket and holds it open; for each request frame the relay forwards, it calls
@@ -26,6 +26,7 @@ import websockets
 RELAY_WS_URL = os.environ["RELAY_WS_URL"]
 RELAY_SECRET = os.environ["RELAY_SECRET"]
 VLLM_LOCAL_URL = os.environ.get("VLLM_LOCAL_URL", "http://localhost:8000").rstrip("/")
+BACKEND_API_KEY = os.environ.get("BACKEND_API_KEY", "")  # injected into forwarded (sglang) calls
 
 
 def log(msg: str) -> None:
@@ -42,7 +43,7 @@ async def handle(ws, send_lock: asyncio.Lock, frame: dict, client: httpx.AsyncCl
             frame["method"],
             url,
             content=frame["body"].encode(),
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", **({"authorization": f"Bearer {BACKEND_API_KEY}"} if BACKEND_API_KEY else {})},
         )
         resp = {
             "id": frame["id"],

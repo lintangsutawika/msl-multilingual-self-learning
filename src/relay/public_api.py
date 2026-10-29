@@ -7,7 +7,7 @@ OUT but cannot accept inbound, so Modal sandboxes can't reach it directly.
 
 This relay is the public rendezvous: it exposes an OpenAI-compatible HTTPS
 endpoint (what the agent calls) and a WebSocket the node dials out to and holds
-open (harbor/relay/bridge.py). Requests arriving on HTTP are forwarded over the
+open (harbor/relay/node_forwarder.py). Requests arriving on HTTP are forwarded over the
 WebSocket to the node, which proxies them to its local vLLM and returns the
 response. Everything lives in *your* Modal account — no third-party tunnel.
 
