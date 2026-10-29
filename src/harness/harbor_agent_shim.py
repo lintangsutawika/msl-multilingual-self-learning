@@ -90,7 +90,18 @@ def _sail_environment_config():
     env: dict[str, str] = {}
     if sail_key := os.getenv("SAIL_API_KEY", ""):
         env["SAIL_API_KEY"] = sail_key
-    return EnvironmentConfig(import_path="sail.harbor:SailboxEnvironment", env=env, kwargs=kwargs)
+    # Raise the SAIL sandbox disk ceiling so the (large) openhands-sdk venv +
+    # task archives fit; the default 20GiB overflowed -> "No space left on device"
+    # -> run_agent exits 2 with no trajectory -> AgentError. The env factory
+    # reads EnvironmentConfig.override_storage_mb -> task_env_config.storage_mb
+    # -> SAIL disk_gib.
+    return EnvironmentConfig(
+        import_path="sail.harbor:SailboxEnvironment",
+        env=env,
+        kwargs=kwargs,
+        override_storage_mb=int(os.getenv("SAIL_STORAGE_MB", "102400")),  # 100 GiB
+        override_memory_mb=int(os.getenv("SAIL_MEMORY_MB", "32768")),      # 32 GiB
+    )
 
 
 # Replace MILES's environment builder with the SAIL one. build_trial_config calls

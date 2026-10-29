@@ -319,10 +319,16 @@ def main():
     # Use the container's current working directory (set by Dockerfile WORKDIR)
     workspace = os.getcwd()
     conv_kwargs: dict[str, Any] = {"agent": agent, "workspace": workspace}
+    # Per-sample episode (validate-round) control: VALIDATE_ROUND_ITERS caps each
+    # run to ~one validate-round (a few tool iterations ending in a `validate`), so
+    # a MILES sample = one episode. 0 => no cap (full solve per sample). Resuming via
+    # SDK persistence then continues across samples episode-by-episode.
+    MAX_VALIDATE_ROUND_ITERS = int(os.environ.get("VALIDATE_ROUND_ITERS", "0"))
     max_iter_raw = os.environ.get("MAX_ITERATIONS")
-    if max_iter_raw:
-        conv_kwargs["max_iteration_per_run"] = int(max_iter_raw)
-        logger.debug(f"Max iterations per run: {max_iter_raw}")
+    iters = MAX_VALIDATE_ROUND_ITERS or (int(max_iter_raw) if max_iter_raw else 0)
+    if iters:
+        conv_kwargs["max_iteration_per_run"] = iters
+        logger.debug(f"Max iterations per run: {iters}")
     # SDK-native persistence/resume: a stable persistence_dir + conversation_id lets the
     # SDK save the full conversation state (message history, tool outputs, workspace) on
     # run() and restore it on a later run with the same id -- the agent then continues

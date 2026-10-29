@@ -37,6 +37,40 @@ class LiveRolloutOpenHandsSDK(OpenHandsSDK):
     # AgentName via the factory swap (openhands-sdk -> this class).
 
     @override
+    async def install(self, environment: BaseEnvironment) -> None:
+        """Install the OpenHands SDK venv WITH mcp + litellm.
+
+        The stock OpenHandsSDK install omits ``mcp``, and litellm (used by the SDK's
+        LLM layer) imports ``mcp.types`` -> every trial dies ModuleNotFoundError: mcp.
+        Mirror MHO's MicroSweAgent fix: add mcp (+ litellm) to the sandbox pip install.
+        """
+        # Check if already installed (mirror base OpenHandsSDK.install -- no is_installed
+        # method; it probes the sandbox python directly).
+        check_result = await environment.exec(
+            command='[ -f /opt/openhands-sdk-venv/bin/python ] && /opt/openhands-sdk-venv/bin/python -c "import openhands.sdk" 2>/dev/null',
+        )
+        if check_result.return_code == 0:
+            return
+        agent_user = environment.default_user or "root"
+        await self.exec_as_root(
+            environment,
+            command=f"mkdir -p /opt/openhands-sdk-venv && chown {agent_user}:{agent_user} /opt/openhands-sdk-venv",
+        )
+        version_spec = f"=={self._version}" if self._version else ""
+        await self.exec_as_agent(
+            environment,
+            command=(
+                "set -euo pipefail; "
+                "curl -LsSf https://astral.sh/uv/install.sh | sh && "
+                'if [ -f "$HOME/.local/bin/env" ]; then source "$HOME/.local/bin/env"; fi && '
+                f"uv python install {self._python_version} && "
+                f"uv venv /opt/openhands-sdk-venv --python {self._python_version} --clear && "
+                "source /opt/openhands-sdk-venv/bin/activate && "
+                f"uv pip install openhands-sdk{version_spec} openhands-tools{version_spec} fastapi mcp litellm"
+            ),
+        )
+
+    @override
     async def configure(self, environment: BaseEnvironment) -> None:
         """Upload OUR runner (with live rollout + logprob capture), not stock."""
         if not _RUNNER.exists():
@@ -126,6 +160,11 @@ class LiveRolloutOpenHandsSDK(OpenHandsSDK):
 
         if self._max_iterations is not None:
             env["MAX_ITERATIONS"] = str(self._max_iterations)
+        # Per-sample episode control: cap each run to ~one validate-round
+        # (MAX_VALIDATE_ROUND → the runner stops after ~one validate), so a MILES
+        # sample = one episode. 0/unset = full solve per sample.
+        if (vri := self._get_env("VALIDATE_ROUND_ITERS")):
+            env["VALIDATE_ROUND_ITERS"] = vri
         if self._temperature is not None:
             env["LLM_TEMPERATURE"] = str(self._temperature)
 
