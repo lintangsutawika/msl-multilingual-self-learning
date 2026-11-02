@@ -28,6 +28,6 @@ Work iteratively: build a model, score your submissions on the held-out test spl
   strictly off-limits. Only the `validate <file.csv>` command grades against them,
   and it returns only a score. Reading the answers is cheating.
 - Only the submitted `predictions.csv` is graded; each validate call is logged.
-- Install any packages you need (CPU-only environment; no GPU in the default setup).
+- Install any packages you need with `pip install --user <package>` (you run as the unprivileged user `agent`; CPU-only environment, no GPU in the default setup).
 - Improve on your prior best validation score across the run.
 - Keep iterating until you have a strong score; write your final `predictions.csv` once satisfied.

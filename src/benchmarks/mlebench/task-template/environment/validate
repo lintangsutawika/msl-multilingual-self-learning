@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# validate <file.csv> — grade a MLE-Bench submission against held-out answers.
-exec python3 /workspace/validate.py "$@"

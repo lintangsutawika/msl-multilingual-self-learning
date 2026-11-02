@@ -15,6 +15,7 @@ Generated tasks land under ``<output>/<competition_id>/``.
 from __future__ import annotations
 
 import os
+import secrets
 import shutil
 from pathlib import Path
 
@@ -91,7 +92,12 @@ def generate(competition_id: str, difficulty: str, output: Path) -> Path:
         task / "tests" / "test.sh",
     ):
         _fill(path, **fills)
-    for _bin in ("tests/test.sh", "environment/startup.sh", "environment/validate"):
+    # Per-task score-signing key: copied root-only into the image and read by node B's
+    # forwarder to verify `validate` scores (see scripts/eval/secure_mlebench_tasks.py).
+    key = task / "environment" / "score_key"
+    key.write_text(secrets.token_hex(32) + "\n")
+    key.chmod(0o600)
+    for _bin in ("tests/test.sh", "environment/startup.sh", "environment/msl-validate", "environment/msl-validate-root"):
         _p = task / _bin
         if _p.exists():
             _p.chmod(0o755)
