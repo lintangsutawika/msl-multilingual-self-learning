@@ -25,6 +25,11 @@ dependencies = [
     "tqdm",
 ]
 
+[project.optional-dependencies]
+# MLE-Bench task preparation only (python -m src.benchmarks.mlebench): uv sync --extra prep.
+# The loop jobs never import mlebench, and each task image installs its own copy.
+prep = ["mlebench"]
+
 [tool.uv.sources]
 # Pin harbor to an exact commit (not branch=main): harbor's job lock.json carries a
 # schema_version that is part of job-lock equality, so walking main forward on one
@@ -34,6 +39,10 @@ harbor = { git = "https://github.com/harbor-framework/harbor.git", rev = "c178c2
 # The Singularity-on-HPC environment, pinned to an exact commit (its overrides track
 # harbor's internals, so pin them together and bump both deliberately).
 harbor-singularity-hpc = { git = "https://github.com/lintangsutawika/harbor-singularity-hpc.git", rev = "59dd049489cd5cad286e9c08be72542837f502d8" }
+
+# Pinned like harbor. Its leaderboard.csv files are Git LFS pointers in a plain clone; the
+# task generator downloads the real ones (src/benchmarks/mlebench/adapter.py).
+mlebench = { git = "https://github.com/openai/mle-bench.git", rev = "507f92e1138bb6e40dac5c6ee7a6758e6424bf97" }
 
 [build-system]
 requires = ["hatchling"]
