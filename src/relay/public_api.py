@@ -139,6 +139,12 @@ def web():
     async def proxy_session(session_id: str, path: str, request: Request):
         return await _proxy_frame(f"/sessions/{session_id}/v1/{path}", request)
 
+    # Live episode push (separated loop): the in-sandbox runner POSTs sealed episodes
+    # here; the forwarder routes /episodes/* to node A's receiver (not the model).
+    @api.api_route("/episodes/{trial_id}/{episode_index}", methods=["POST"])
+    async def proxy_episode(trial_id: str, episode_index: str, request: Request):
+        return await _proxy_frame(f"/episodes/{trial_id}/{episode_index}", request)
+
     def _proxy_frame(forward_path: str, request: Request):
         return _proxy_impl(forward_path, request, secret, ws=bridge_ws["ws"], pending=pending, send_lock=send_lock)
 

@@ -76,6 +76,5 @@ echo "==> Building ${OUT_SIF} ..."
 cat <<MSG
 ==> Done: ${OUT_SIF}
 Run training against the miles image:
-  export BASE_SIF="${OUT_SIF}"
-  bash scripts/optimize/train.sh
+  MILES_SIF="${OUT_SIF}" qsub -N trainer -j oe -o logs/ -P gai51740 -q R9920261300 -v RTYPE=rt_HF -l select=1 -V scripts/trainer.sh
 MSG

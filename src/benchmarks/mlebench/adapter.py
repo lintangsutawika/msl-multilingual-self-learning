@@ -93,7 +93,7 @@ def generate(competition_id: str, difficulty: str, output: Path) -> Path:
     ):
         _fill(path, **fills)
     # Per-task score-signing key: copied root-only into the image and read by node B's
-    # forwarder to verify `validate` scores (see scripts/eval/secure_mlebench_tasks.py).
+    # forwarder to verify `validate` scores (the rollout forwarder reads it via SCORE_KEYS_DIR).
     key = task / "environment" / "score_key"
     key.write_text(secrets.token_hex(32) + "\n")
     key.chmod(0o600)

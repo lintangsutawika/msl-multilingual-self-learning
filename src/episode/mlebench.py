@@ -48,6 +48,7 @@ def compute_episode_reward(
     *,
     prior_best: float | None = None,
     margin: float = 1e-12,
+    lower_is_better: bool = True,
 ) -> list[int]:
     """Per-episode binary-improvement reward for a sequence of validate scores.
 
@@ -62,6 +63,8 @@ def compute_episode_reward(
             an empty prior) only if prior_best is None and it's the first; otherwise the
             first improvement over prior_best gets +1.
         margin: epsilon so a tie is not an improvement.
+        lower_is_better: metric direction for this competition (e.g. False for AUC /
+            accuracy). MLE-Bench grading reports carry it as ``is_lower_better``.
 
     Returns:
         A list of 0/1 rewards, one per episode (same length as submission_scores).
@@ -69,7 +72,12 @@ def compute_episode_reward(
     rewards: list[int] = []
     best = prior_best
     for score in submission_scores:
-        improved = best is None or (score + margin) < best
+        if best is None:
+            improved = True
+        elif lower_is_better:
+            improved = (score + margin) < best
+        else:
+            improved = (score - margin) > best
         rewards.append(1 if improved else 0)
         if improved:
             best = score
