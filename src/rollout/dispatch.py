@@ -8,7 +8,7 @@ with the agent's LLM pointed at the relay *session* URL for that trial:
 so the rollout job's forwarder files every call of the trial under spool/<trial>.jsonl.
 The relay URL/secret come from the rollout job's endpoint.env (fresh per rollout job).
 
-v0 runs a fixed task list with bounded concurrency. Later: take tasks from the
+Runs the task list round-robin (--rounds passes, 0 = forever) with bounded concurrency. Later: take tasks from the
 task_queue/ the trainer writes, and honor dispatch_ctl.json (pause / max in flight).
 
     python src/rollout/dispatch.py --run-dir <MSL_STORE>/rollout --tasks aerial-cactus-identification
@@ -77,6 +77,7 @@ def main() -> int:
     ap.add_argument("--max-concurrent", type=int, default=2)
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--trial-timeout", type=int, default=14400)
+    ap.add_argument("--rounds", type=int, default=1, help="passes over the task list (0 = forever)")
     a = ap.parse_args()
 
     run_dir = Path(a.run_dir)
@@ -100,13 +101,29 @@ def main() -> int:
             tasks.append(t)
         else:
             log(f"skip {t}: no baked data at {a.tasks_dir}/{t}/environment/public")
-    stamp = datetime.now().strftime("%m%d%H%M")
-    pending = [(t, f"{t}__{stamp}{i:02d}") for i, t in enumerate(tasks)]
+    if not tasks:
+        log("no runnable tasks")
+        return 1
+
+    def trials():
+        # Round-robin over the tasks; trial ids start with the task (= competition) id,
+        # which the forwarder uses to pick the score-signing key.
+        r = 0
+        while a.rounds == 0 or r < a.rounds:
+            for t in tasks:
+                yield t, f"{t}__{datetime.now().strftime('%m%d%H%M%S')}r{r}"
+            r += 1
+
+    pending = trials()
     running: dict[str, subprocess.Popen] = {}
-    while pending or running:
-        while pending and len(running) < a.max_concurrent:
-            task, trial = pending.pop(0)
-            running[trial] = launch(task, trial, ep, a, logs)
+    exhausted = False
+    while not exhausted or running:
+        while not exhausted and len(running) < a.max_concurrent:
+            nxt = next(pending, None)
+            if nxt is None:
+                exhausted = True
+                break
+            running[nxt[1]] = launch(*nxt, ep, a, logs)
         for trial, p in list(running.items()):
             if p.poll() is not None:
                 log(f"done {trial} exit={p.returncode}")
