@@ -7,7 +7,7 @@ OUT but cannot accept inbound, so Modal sandboxes can't reach it directly.
 
 This relay is the public rendezvous: it exposes an OpenAI-compatible HTTPS
 endpoint (what the agent calls) and a WebSocket the node dials out to and holds
-open (harbor/relay/bridge.py). Requests arriving on HTTP are forwarded over the
+open (harbor/relay/node_forwarder.py). Requests arriving on HTTP are forwarded over the
 WebSocket to the node, which proxies them to its local vLLM and returns the
 response. Everything lives in *your* Modal account — no third-party tunnel.
 
@@ -130,16 +130,34 @@ def web():
 
     @api.api_route("/v1/{path:path}", methods=["GET", "POST"])
     async def proxy(path: str, request: Request):
+        return await _proxy_frame(f"/v1/{path}", request)
+
+    # Session-aware path: MILES's session server serves the agent at
+    # /sessions/<id>/v1/<path> (per-session token accounting). Forward the FULL
+    # session path so the node bridge routes to the session server unchanged.
+    @api.api_route("/sessions/{session_id}/v1/{path:path}", methods=["GET", "POST"])
+    async def proxy_session(session_id: str, path: str, request: Request):
+        return await _proxy_frame(f"/sessions/{session_id}/v1/{path}", request)
+
+    # Live episode push (separated loop): the in-sandbox runner POSTs sealed episodes
+    # here; the forwarder routes /episodes/* to node A's receiver (not the model).
+    @api.api_route("/episodes/{trial_id}/{episode_index}", methods=["POST"])
+    async def proxy_episode(trial_id: str, episode_index: str, request: Request):
+        return await _proxy_frame(f"/episodes/{trial_id}/{episode_index}", request)
+
+    def _proxy_frame(forward_path: str, request: Request):
+        return _proxy_impl(forward_path, request, secret, ws=bridge_ws["ws"], pending=pending, send_lock=send_lock)
+
+    async def _proxy_impl(forward_path: str, request: Request, secret, ws, pending, send_lock):
         if request.headers.get("authorization") != f"Bearer {secret}":
             raise HTTPException(status_code=401, detail="bad relay token")
-        ws = bridge_ws["ws"]
         if ws is None:
-            raise HTTPException(status_code=503, detail="no vLLM bridge connected")
+            raise HTTPException(status_code=503, detail="no bridge connected")
         rid = uuid.uuid4().hex
         frame = {
             "id": rid,
             "method": request.method,
-            "path": f"/v1/{path}",
+            "path": forward_path,
             "query": request.url.query or "",
             "body": (await request.body()).decode(),
         }

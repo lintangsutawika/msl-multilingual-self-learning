@@ -28,7 +28,7 @@
 #   N_TASKS          subset limit for a smoke run; empty = all.
 #   N_CONCURRENT     passed to run.sh (default 32).
 #   QUIET            suppress harbor live renderer (default 1 under a batch).
-#   AGENT_TIMEOUT_MULT  agent timeout multiplier (default 6: 6 x 300s task timeout = 1800s trial budget).
+#   AGENT_TIMEOUT_MULT  agent timeout multiplier (default 24: 24 x 300s task timeout = 7200s = 2h trial budget).
 #   RESUME_FILTER_ERRORS  space-separated error types to retry on resume.
 #   DELIBERATOR_BASE_URL  if set, skip local serve and eval against this endpoint.
 #   SERVE_CONFIG     per-model serve json (default configs/serve/<MODEL>.json).
@@ -124,7 +124,7 @@ job_port() {
 # reuse a per-run port and the config's baked endpoint never matches the serve.
 _JB_MODEL_BARE="${MODEL#openai/}"
 _JB_MODEL_BARE="${_JB_MODEL_BARE#litellm_proxy/}"
-_JB_RUN="${RUN:-0}"
+_JB_RUN="${RUN:-$(( ${PBS_ARRAY_INDEX:-1} - 1 ))}"
 _JB_SLUG="${TASKS%/}"   # dataset slug (full task path, / -> --)
 _JB_SLUG="${_JB_SLUG#./}"
 _JB_SLUG="${_JB_SLUG#/}"
@@ -197,7 +197,7 @@ TASK_PATH="${TASKS:-benchmarks/leetcode/tasks-b}" \
 MODEL_BASE_URL="${DELIBERATOR_BASE_URL}" MODEL_API_KEY="EMPTY" \
 MODEL="litellm_proxy/${MODEL}" \
 N_CONCURRENT="${N_CONCURRENT:-32}" \
-AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-6.0}" \
+AGENT_TIMEOUT_MULT="${AGENT_TIMEOUT_MULT:-24.0}" \
 RESUME_FILTER_ERRORS="${RESUME_FILTER_ERRORS:-}" \
 QUIET="${QUIET:-1}" \
 bash scripts/eval/run.sh &
