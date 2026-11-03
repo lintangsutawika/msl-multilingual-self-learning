@@ -1,0 +1,16 @@
+# Python environment for running pipeline.py (import, split, harbor, export). The grading packages are pinned to
+# the same versions as task-template/environment/Dockerfile, so the sanity check and in-box grading agree.
+pandas==3.1.0
+numpy==2.4.6
+scipy==1.17.1
+scikit-learn==1.9.1
+pyyaml==6.0.3
+pillow==13.0.0
+Levenshtein==0.27.5
+# mledojo-download only (MLE-Dojo's prepare code):
+kaggle==1.6.17
+py7zr
+requests
+wget
+tqdm
+pyarrow==26.0.1            # parquet files in some competitions (e.g. wsdm-cup-multilingual-chatbot-arena)

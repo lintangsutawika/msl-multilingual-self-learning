@@ -1,0 +1,28 @@
+schema_version = "1.1"
+
+[task]
+name = "mle-train/{task_id}"
+description = "{task_id} ({source}) with a public/private leaderboard split."
+
+[metadata]
+source = "{source}"
+competition_id = "{task_id}"
+higher_is_better = {higher_is_better}
+id_column = "{id_column}"
+public_ids = {public_ids}
+private_ids = {private_ids}
+public_sample = {public_sample}
+private_sample = {private_sample}
+reward = "{reward}"
+
+[agent]
+timeout_sec = {agent_timeout}
+
+[verifier]
+timeout_sec = 1800.0
+
+[environment]
+cpus = {cpus}
+memory_mb = {memory_mb}
+storage_mb = 20480
+network_mode = "public"
