@@ -22,7 +22,11 @@ class ScriptArgs(U.ExecuteTrainConfig):
     # HF loader (bridge mode only). HF exports get config/tokenizer copied by the publisher instead.
     hf_checkpoint: str = os.environ.get("HF_CHECKPOINT", "Qwen/Qwen3.5-9B")
     _msl_repo: str = os.environ.get("MSL_REPO", str(Path(__file__).resolve().parents[1]))
-    ref_load: str = f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/checkpoints/qwen3.5-9B_torch_dist"
+    # Base model inputs on group storage (MSL_BASE): the Megatron torch_dist conversion of the
+    # base HF model (actor init + KL reference) and the placeholder prompt file MILES requires
+    # (the spool rollout fn ignores its contents).
+    _msl_base: str = os.environ.get("MSL_BASE", "/groups/gai51740/aci18914wh/msl/base")
+    ref_load: str = os.environ.get("REF_LOAD", f"{_msl_base}/qwen3.5-9B_torch_dist")
     save_dir: str = os.environ.get("SAVE", f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/checkpoints")
     episodes_dir: str = os.environ.get("EPISODES_DIR", f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/episodes")
     max_seq_len: int = 32768
@@ -34,7 +38,7 @@ class ScriptArgs(U.ExecuteTrainConfig):
     harbor_env_kwargs: str = os.environ.get("HARBOR_ENV_KWARGS", "")
     harbor_tasks_dir: str = os.environ.get("HARBOR_TASKS_DIR", f"{_msl_repo}/harbor_tasks/mlebench-low")
     harbor_trials_dir: str = os.environ.get("HARBOR_TRIALS_DIR", f"{_msl_repo}/runs/qwen3.5-9b_mlebench_episodes/harbor_trials")
-    prompt_data: str = os.environ.get("PROMPT_DATA", f"{_msl_repo}/runs/seed/seed_list.jsonl")
+    prompt_data: str = os.environ.get("PROMPT_DATA", f"{_msl_base}/seed_list.jsonl")
     agent_model_name: str = os.environ.get("AGENT_MODEL_NAME", "qwen3.5-9B")
     agent_timeout: int = int(os.environ.get("AGENT_TIMEOUT", "5400"))
     modal_config_file: str = os.environ.get("MODAL_CONFIG_PATH", "")
@@ -51,7 +55,12 @@ def cleanup():
 
 def execute(args: ScriptArgs):
     ckpt_args = (f"--hf-checkpoint {args.hf_checkpoint} --ref-load {args.ref_load} --save {args.save_dir} --save-interval {args.save_interval} " + (f"--save-hf {args.save_hf} " if args.save_hf else ""))
-    perf_args = ("--tensor-model-parallel-size 2 --sequence-parallel --pipeline-model-parallel-size 1 --context-parallel-size 1 --recompute-granularity full --recompute-method uniform --recompute-num-layers 1 --micro-batch-size 1 --max-tokens-per-gpu 16384 --optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer ")
+    # Long context (episodes reach 150k+ tokens; Qwen3.5-9B allows 262144): context parallelism
+    # splits each sequence across CP_SIZE GPUs (MILES passes GDN state between CP ranks);
+    # dynamic batching packs samples up to MAX_TOKENS_PER_GPU per micro-batch.
+    tp, cp = os.environ.get("TP_SIZE", "2"), os.environ.get("CP_SIZE", "1")
+    dyn = "--use-dynamic-batch-size " if os.environ.get("DYNAMIC_BATCH", "1") == "1" else ""
+    perf_args = ("--tensor-model-parallel-size %s --sequence-parallel --pipeline-model-parallel-size 1 --context-parallel-size %s --recompute-granularity full --recompute-method uniform --recompute-num-layers 1 --micro-batch-size 1 --max-tokens-per-gpu %s %s--optimizer-cpu-offload --overlap-cpu-optimizer-d2h-h2d --use-precision-aware-optimizer " % (tp, cp, os.environ.get("MAX_TOKENS_PER_GPU", "16384"), dyn))
     # MILES turns --offload-train on by default (model memory paged out between steps); the trainer
     # runs no SGLang, so it buys nothing here, and with it the HF export read paged-out params
     # and wrote all-zero weights (2026-11-03). Only an explicit --no-offload-train disables it.
@@ -66,10 +75,13 @@ def execute(args: ScriptArgs):
         fn = os.environ.get("ROLLOUT_FUNCTION_PATH", "src.trainer.spool_rollout.generate_rollout")
         ingest_args = (
             "--debug-train-only "  # the trainer runs no sglang; rollouts come from the rollout job via the rollout fn
+            # After each save: copy config/tokenizer into the HF export, publish LATEST for the
+            # rollout job's weight watcher, prune old checkpoints (src/trainer/publisher.py).
+            "--custom-megatron-post-save-hook-path src.trainer.publisher.post_save "
             "--rollout-function-path %s "
             "--prompt-data %s --input-key prompt --metadata-key metadata "
             "--rollout-shuffle "
-            "--global-batch-size %s --rollout-batch-size %s --num-rollout %s " % (fn, os.environ.get("PROMPT_DATA", "/home/aci18914wh/msl-multilingual-self-learning/runs/seed/seed_list.jsonl"), os.environ.get("ROLLOUT_BATCH_SIZE", "8"), os.environ.get("ROLLOUT_BATCH_SIZE", "8"), os.environ.get("NUM_ROLLOUT", "16"))
+            "--global-batch-size %s --rollout-batch-size %s --num-rollout %s " % (fn, args.prompt_data, os.environ.get("ROLLOUT_BATCH_SIZE", "8"), os.environ.get("ROLLOUT_BATCH_SIZE", "8"), os.environ.get("NUM_ROLLOUT", "16"))
         )
         print("[run_train] ONLINE_MODE: rollout-function-path=%s spool=%s" % (fn, os.environ.get("SPOOL_DIR", "")), flush=True)
     else:
@@ -84,7 +96,7 @@ def execute(args: ScriptArgs):
             wandb_args += "--wandb-key %s " % key
     train_args = ckpt_args + perf_args + ppo_args + optimizer_args + ingest_args + misc_args + wandb_args
     _msl_src = str(Path(__file__).resolve().parent)
-    extra_env_vars = {"PYTHONPATH": ":".join([_msl_src, args.megatron_path, *agentic_pythonpath_dirs(), str(U.repo_base_dir)]), **harbor_env_vars(args), "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.8,max_split_size_mb:512", "EPISODE_CHECKER_MODULE": "src.episode.mlebench", **{k: v for k, v in os.environ.items() if k.startswith("SPOOL_") or k == "METRIC_DIRECTIONS"}}
+    extra_env_vars = {"PYTHONPATH": ":".join([_msl_src, args.megatron_path, *agentic_pythonpath_dirs(), str(U.repo_base_dir)]), **harbor_env_vars(args), "PYTORCH_CUDA_ALLOC_CONF": "garbage_collection_threshold:0.8,max_split_size_mb:512", "EPISODE_CHECKER_MODULE": "src.episode.mlebench", **{k: v for k, v in os.environ.items() if k.startswith("SPOOL_") or k in ("METRIC_DIRECTIONS", "HF_BASE_DIR", "KEEP_HF", "KEEP_CKPT")}}
     U.execute_train(train_args=train_args, config=args, num_gpus_per_node=args.num_gpus_per_node, megatron_model_type=args.megatron_model_type, megatron_path=args.megatron_path, extra_env_vars=extra_env_vars, train_script="train_async.py")
 
 @U.dataclass_cli
