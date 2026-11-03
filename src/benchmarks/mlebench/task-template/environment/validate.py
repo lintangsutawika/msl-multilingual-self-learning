@@ -43,8 +43,25 @@ def checked_copy(path: str, work: str) -> str:
     return dst
 
 
+def ensure_data() -> None:
+    """Place the baked answers where `mlebench grade` reads them (as tests/test.sh does),
+    so grading does not depend on startup.sh having run with the same HOME."""
+    from mlebench.registry import registry
+
+    comp = registry.get_competition(COMPETITION)
+    for src, dst in (("/workspace/private", comp.private_dir), ("/workspace/public", comp.public_dir)):
+        if os.path.isdir(src) and not (os.path.isdir(dst) and os.listdir(dst)):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+    # Always overwrite: the leaderboard bundled with a pip-installed mlebench can be a
+    # placeholder without a `score` column (test.sh copies it unconditionally too).
+    if os.path.exists("/workspace/leaderboard.csv"):
+        os.makedirs(os.path.dirname(comp.leaderboard), exist_ok=True)
+        shutil.copy("/workspace/leaderboard.csv", comp.leaderboard)
+
+
 def grade(submission_path: str, work: str) -> float:
     os.environ.setdefault("KAGGLE_CONFIG_DIR", "/root/.kaggle")
+    ensure_data()
     subs = f"{work}/subs.jsonl"
     with open(subs, "w") as f:
         f.write(json.dumps({"competition_id": COMPETITION,
@@ -59,7 +76,8 @@ def grade(submission_path: str, work: str) -> float:
         comps = rep.get("competition_reports") or []
         if comps and comps[0].get("score") is not None:
             return float(comps[0].get("score"))
-    raise RuntimeError(f"grade produced no score; rc={r.returncode} {r.stdout[-200:]!r}")
+    raise RuntimeError(f"grade produced no score; rc={r.returncode} "
+                       f"stdout={r.stdout[-200:]!r} stderr={r.stderr[-300:]!r}")
 
 
 def sign(score_text: str) -> str | None:

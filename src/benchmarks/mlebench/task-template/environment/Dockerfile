@@ -6,12 +6,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends git curl sudo && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir git+https://github.com/openai/mle-bench.git
 WORKDIR /workspace
-COPY validate_server.py /workspace/validate_server.py
+COPY validate_server.py /opt/msl/validate_server.py
 COPY validate.py /opt/msl/validate.py
 COPY msl-validate /usr/local/bin/validate
 COPY msl-validate-root /usr/local/bin/validate-root
 COPY score_key /etc/msl/score_key
-COPY neutralize_rules.py /workspace/neutralize_rules.py
+COPY neutralize_rules.py /opt/msl/neutralize_rules.py
 
 # Start the validate server on box creation (keeps box alive).
 COPY startup.sh /workspace/startup.sh
@@ -20,6 +20,8 @@ COPY startup.sh /workspace/startup.sh
 COPY public/ /workspace/public/
 COPY private/ /workspace/private/
 COPY leaderboard.csv /workspace/leaderboard.csv
+
+COPY validate_stub.py /workspace/validate.py
 
 # msl-secure: the agent runs as the unprivileged user `agent` (task.toml [agent] user).
 # Held-out answers, the grader and the score-signing key are root-only; `validate`

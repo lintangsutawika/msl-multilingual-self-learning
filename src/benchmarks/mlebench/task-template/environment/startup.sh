@@ -6,7 +6,7 @@ set -euo pipefail
 COMPETITION="{comp_id}"
 
 # 1. Neutralize Kaggle's interactive rule-acceptance prompts (harmless no-op now).
-python3 /workspace/neutralize_rules.py
+python3 /opt/msl/neutralize_rules.py
 
 # 2. Place baked data at the mlebench registry paths + expose /workspace/public.
 echo "[startup] placing baked data for $COMPETITION (no Kaggle)"
@@ -31,7 +31,7 @@ PY
 echo "[startup] public data at /workspace/public: $(ls /workspace/public 2>/dev/null)"
 
 # 3. Start the validate server in the background.
-python3 /workspace/validate_server.py &
+python3 /opt/msl/validate_server.py &
 echo "[startup] validate server started on :5000"
 
 # 4. Keep the Sailbox alive for agent execs.
