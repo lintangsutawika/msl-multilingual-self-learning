@@ -23,6 +23,7 @@
 #   LATEST_FILE        the trainer run's LATEST pointer to hot-swap from (default: none)
 #   DISPATCH_TASKS     comma-separated mlebench-low tasks to run as real trials (default: none)
 #   DISPATCH_MAX_CONCURRENT / MAX_ITERATIONS   dispatcher limits (default 2 / 200)
+#   DISPATCH_ROUNDS    passes over DISPATCH_TASKS (default 1; 0 = forever)
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 cd "$REPO_ROOT"
@@ -135,6 +136,7 @@ if [ -n "${LATEST_FILE:-}" ]; then start_watcher; log "weight watcher on ${LATES
 if [ -n "${DISPATCH_TASKS:-}" ]; then
   .venv/bin/python src/rollout/dispatch.py --run-dir "$RUN_DIR" --tasks "$DISPATCH_TASKS" \
     --max-concurrent "${DISPATCH_MAX_CONCURRENT:-2}" --max-iterations "${MAX_ITERATIONS:-200}" \
+    --rounds "${DISPATCH_ROUNDS:-1}" \
     > "${LOG_DIR}/dispatch.log" 2>&1 &
   PIDS+=("$!")
   log "dispatcher started for ${DISPATCH_TASKS}"
