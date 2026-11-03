@@ -8,8 +8,8 @@ RUN pip install --no-cache-dir git+https://github.com/openai/mle-bench.git
 WORKDIR /workspace
 COPY validate_server.py /opt/msl/validate_server.py
 COPY validate.py /opt/msl/validate.py
-COPY msl-validate /usr/local/bin/validate
-COPY msl-validate-root /usr/local/bin/validate-root
+COPY bin/validate /usr/local/bin/validate
+COPY bin/validate-root /usr/local/bin/validate-root
 COPY score_key /etc/msl/score_key
 COPY neutralize_rules.py /opt/msl/neutralize_rules.py
 
@@ -28,8 +28,8 @@ COPY validate_stub.py /workspace/validate.py
 # reaches the grader through one sudo rule. /workspace is sticky: the agent can add
 # files there but cannot move or replace root's.
 RUN useradd -m -s /bin/bash agent \
- && printf 'agent ALL=(root) NOPASSWD: /usr/local/bin/validate-root\n' > /etc/sudoers.d/msl-validate \
- && chmod 440 /etc/sudoers.d/msl-validate \
+ && printf 'agent ALL=(root) NOPASSWD: /usr/local/bin/validate-root\n' > /etc/sudoers.d/validate \
+ && chmod 440 /etc/sudoers.d/validate \
  && chown -R root:root /opt/msl /etc/msl /usr/local/bin/validate-root \
  && chmod 700 /opt/msl /etc/msl /usr/local/bin/validate-root \
  && chmod 600 /etc/msl/score_key /opt/msl/validate.py \
