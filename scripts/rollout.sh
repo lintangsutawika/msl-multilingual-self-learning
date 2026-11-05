@@ -29,6 +29,7 @@
 #   DISPATCH_ROUNDS    passes over DISPATCH_TASKS (default 1; 0 = forever)
 #   CONDENSER_MAX_EVENTS  agent summarizes older history past this many events (default 120; 0 = off)
 #   MAX_GEN_TOKENS     cap on tokens per model call, set by the forwarder (default 16384; 0 = no cap)
+#   TERMINAL_MAX_TIMEOUT  cap on how long one agent terminal action may block, seconds (default 1800; 0 = no cap)
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 cd "$REPO_ROOT"
@@ -157,7 +158,7 @@ if [ -n "${LATEST_FILE:-}" ]; then start_watcher; log "weight watcher on ${LATES
 if [ -n "${DISPATCH_TASKS:-}" ]; then
   .venv/bin/python src/rollout/dispatch.py --run-dir "$RUN_DIR" --tasks "$DISPATCH_TASKS" \
     --max-concurrent "${DISPATCH_MAX_CONCURRENT:-2}" --max-iterations "${MAX_ITERATIONS:-200}" \
-    --rounds "${DISPATCH_ROUNDS:-1}" --condenser-max-events "${CONDENSER_MAX_EVENTS:-120}" \
+    --rounds "${DISPATCH_ROUNDS:-1}" --condenser-max-events "${CONDENSER_MAX_EVENTS:-120}" --terminal-max-timeout "${TERMINAL_MAX_TIMEOUT:-1800}" \
     > "${LOG_DIR}/dispatch.log" 2>&1 &
   PIDS+=("$!")
   log "dispatcher started for ${DISPATCH_TASKS}"

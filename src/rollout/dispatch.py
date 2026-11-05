@@ -77,6 +77,7 @@ def launch(task: str, trial: str, ep: dict, a, logs: Path) -> subprocess.Popen:
         "--ae", f"LLM_MODEL=litellm_proxy/{a.model}",
         "--ae", f"MAX_ITERATIONS={a.max_iterations}",
         *(["--ae", f"CONDENSER_MAX_EVENTS={a.condenser_max_events}"] if a.condenser_max_events else []),
+        *(["--ae", f"TERMINAL_MAX_TIMEOUT={a.terminal_max_timeout}"] if a.terminal_max_timeout else []),
         "--job-name", trial,
         "-o", str(a.jobs_dir), "-y",
     ]
@@ -96,6 +97,8 @@ def main() -> int:
                     help="harbor agent name or import path (stock: openhands-sdk)")
     ap.add_argument("--condenser-max-events", type=int, default=120,
                     help="summarize history past this many events (0 = never; needs the condensing agent)")
+    ap.add_argument("--terminal-max-timeout", type=int, default=1800,
+                    help="cap on how long one terminal action may block, seconds (0 = no cap; needs the condensing agent)")
     ap.add_argument("--max-concurrent", type=int, default=2)
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--trial-timeout", type=int, default=14400)
