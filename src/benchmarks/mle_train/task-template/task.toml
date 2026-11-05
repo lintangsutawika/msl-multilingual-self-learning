@@ -16,6 +16,7 @@ private_sample = {private_sample}
 reward = "{reward}"
 
 [agent]
+user = "agent"
 timeout_sec = {agent_timeout}
 
 [verifier]

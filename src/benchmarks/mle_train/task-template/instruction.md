@@ -15,13 +15,16 @@ Work iteratively: build a model, check it on the public leaderboard with `valida
 2. Predict **every** row of the test set, in the format of `{sample_submission}` (same columns, header, ids).
 3. `validate <your_file.csv>` scores your file on the **public leaderboard**, a fixed hidden subset of about 30% of
    the test rows, and prints `score=...`. Call it after every material improvement; the run tracks your
-   per-submission scores and rewards improving on your previous best public score.
+   per-submission scores and rewards improving on your previous best public score. (`python validate.py <file.csv>`
+   in `/workspace` does the same.)
 4. Your **final** submission must be written to `/workspace/predictions.csv`. It is graded at the end on the
    **private leaderboard**, the other ~70% of the test rows, which you never see a score for. Avoid overfitting to the
    public leaderboard.
 
 # Rules
 - Only `validate` may be used to get scores. Do not look for, read, or reconstruct the answers.
-- Compute: {cpus} CPUs, {memory_gb} GB RAM, no GPU, {hours} hours in total. You may install packages with pip.
+- The answers and the grader are not accessible to you; `validate` returns only a score.
+- You run as the unprivileged user `agent`. Install packages with `pip install --user <package>`.
+- Compute: {cpus} CPUs, {memory_gb} GB RAM, no GPU, {hours} hours in total.
 - Keep iterating until your score stops improving, then make sure `/workspace/predictions.csv` holds your best model's
   predictions for the full test set.

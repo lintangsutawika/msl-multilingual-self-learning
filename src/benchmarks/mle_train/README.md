@@ -9,6 +9,9 @@ How a task works:
 - During the run the agent calls `validate <file.csv>`. It scores the file on the **public** split, a fixed random
   30% of the test ids, and logs the score. These scores are the per-episode signal: an episode is the agent steps
   between two `validate` calls.
+- The agent runs as the unprivileged user `agent`. `validate` reaches the root-only grader and public answers
+  through one `sudo` rule and prints a signed `score=<s> sig=<hmac>` line (HMAC with the task's
+  `environment/score_key`). The rollout forwarder only trusts signed scores (`SCORE_KEYS_DIR` = the tasks folder).
 - After the run, the verifier grades `/workspace/predictions.csv` on the **private** split, the other 70%. The reward
   is the submission's position on the competition's real Kaggle private leaderboard, in [0, 1].
 
@@ -123,12 +126,17 @@ and comparing against the reference build. The pieces that make this hold:
   differs.
 - Grading packages are pinned in `requirements.txt` and in the task Dockerfile.
 - The public/private split depends only on the sorted test ids and seed 0.
-- MLE-Dojo's own preparation has unseeded randomness, which the pipeline seeds per competition:
-  - DSBench sample submissions are a random row of the answers, picked in filesystem order;
-  - nyc-taxi-trip-duration's sample submission is random;
+- MLE-Dojo's own preparation has unseeded randomness. The pipeline seeds `random` and `numpy` from each
+  competition's (or DSBench folder's) name before preparing it:
+  - DSBench sample submissions are a random row of the answers, picked in filesystem order (now in sorted order);
+  - many Kaggle prepare scripts draw random sample submissions (e.g. home-data-for-ml-course,
+    mercedes-benz-greener-manufacturing, nyc-taxi-trip-duration);
   - the-nature-conservancy-fisheries-monitoring shuffles its test split.
 
-  Fisheries shuffles a file list in filesystem order, so its test set can still differ between machines.
+  Fisheries shuffles a file list in filesystem order, so its test set can still differ between machines. Data
+  prepared by an older, unseeded version of the pipeline must be deleted and downloaded again to match.
+- Kaggle prepare scripts run with pandas' Python-backed strings. With `pyarrow` installed, pandas 3 would use Arrow
+  strings, which sklearn's `train_test_split` can't index (it broke nbme-score-clinical-patient-notes).
 - MLE-Dojo's DSBench step extracts with an interactive `unzip` that silently drops files when no terminal is
   attached. The pipeline extracts with Python instead (`sources/dsbench_prepare.py`).
 
@@ -193,8 +201,9 @@ TASKS/<task_id>/
   instruction.md          full description, metric direction, compute budget, public/private workflow
   task.toml               metadata: source, direction, split sizes, public_sample (sample submission's public
                           score, the baseline for the first episode); 4 CPUs, 16 GB, 2 h by default
-  environment/            Dockerfile (grading packages pinned as in requirements.txt), validate, grader,
-                          public data (hardlinked), public_answers.csv
+  environment/            Dockerfile (grading packages pinned as in requirements.txt; agent user, sudo rule),
+                          bin/validate + bin/validate-root + validate.py (signed scores), score_key (kept across
+                          rebuilds), grader + public_answers.csv (root-only in the box), public data (hardlinked)
   tests/                  test.sh (private grading -> reward.txt, final_score.json), grader, private answers,
                           leaderboard
   solution/solve.sh       oracle: submits the sample submission
@@ -216,10 +225,11 @@ metric direction. A missing or invalid submission gets 0, with the reason in `fi
   sets, like MLE-bench's, come from Kaggle's original *training* data, so an agent with internet could download it
   and find the test answers. To close this, preinstall the packages and turn networking off, or allow only a
   package mirror.
-- **Public answers in the box.** `validate` runs inside the box, so `/opt/grader/public_answers.csv` is readable
-  and `/logs/verifier/validation_scores.jsonl` is writable. This can't change the private reward, but it can fake
-  the public, per-episode signal. The fix is serving `validate` from outside the box. The MLE-bench template in
-  `src/benchmarks/mlebench/` has the same limitation.
+- **Public answers in the box, root-only.** `validate` runs inside the box, so the public answers are there, readable
+  only by root; the agent reaches them only through `sudo validate-root`, which refuses protected paths, links and
+  files the agent didn't create, and runs the grader with `python3 -I`. Scores are HMAC-signed, so printing
+  `score=...` by hand earns nothing. This relies on the sandbox's user separation; the private answers are never in
+  the box. Same design as the MLE-bench template in `src/benchmarks/mlebench/`.
 - **The reward is an approximation of Kaggle rank.** Where MLE-Dojo re-split Kaggle's training data, our test set
   isn't Kaggle's, so leaderboard position is approximate; MLE-bench has the same limitation. The two
   leaderboard-position checks reject the cases that are clearly not comparable.
@@ -229,9 +239,10 @@ metric direction. A missing or invalid submission gets 0, with the reason in `fi
   Tabular Playground Dec 2021.
 - **Compute.** The box has 4 CPUs, 16 GB, no GPU and 2 h. `index.tsv` records `modality` and `public_mb`; image and
   very large tasks may not be solvable in that budget. Filter them with `harbor --max-public-mb` or `--tasks`.
-- **Not in the reference build yet.** global-wheat-detection and benchmark-bond-trade-price-challenge need their
-  Kaggle rules accepted. wsdm-cup-multilingual-chatbot-arena failed before `pyarrow` was added to
-  `requirements.txt`; a rerun picks up all three.
+- **Not in the reference build.** benchmark-bond-trade-price-challenge still needs its Kaggle rules accepted.
+  global-wheat-detection downloads, but MLE-Dojo's own prepare script fails on it under numpy 2 ("only integer
+  scalar arrays can be converted to a scalar index"); it is an image-detection task, so it was left out rather than
+  patched.
 
 ## Other sources
 

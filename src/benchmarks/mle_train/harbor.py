@@ -3,20 +3,26 @@
     <out>/<task_id>/
         instruction.md            full task description + metric direction + public/private workflow
         task.toml                 metadata: source, direction, split sizes, sample-submission scores (episode baseline)
-        environment/Dockerfile    python:3.12-slim + common ML libs; public data at /workspace/public
-        environment/validate      scores a file on the PUBLIC split, logs to /logs/verifier/validation_scores.jsonl
-        environment/grader/       grade_cli.py + the task's grader + public_answers.csv  (inside the agent's box)
+        environment/Dockerfile    python:3.12-slim + common ML libs; public data at /workspace/public; agent runs
+                                  as the unprivileged user `agent`
+        environment/bin/validate  what the agent calls: `validate <file.csv>` -> sudo validate-root (root-only)
+        environment/validate.py   root-only: scores a file on the PUBLIC split, logs it, prints a signed
+                                  `score=<s> sig=<hmac>` line (the rollout forwarder only trusts signed scores)
+        environment/grader/       grade_cli.py + the task's grader + public_answers.csv  (root-only in the box)
+        environment/score_key     per-task HMAC key (root-only in the box); the forwarder reads it from here
+                                  (SCORE_KEYS_DIR=<out>); kept across rebuilds so built images stay valid
         tests/test.sh             grades /workspace/predictions.csv on the PRIVATE split, writes reward.txt
         tests/grader/             grade_cli.py + the task's grader + private_answers.csv (+ leaderboard.csv)
         solution/solve.sh         oracle: submits the sample submission
 
 Harbor uploads tests/ only after the agent finishes, so the private answers are never in the agent's box.
-The public answers are (validate runs in the box); see README "Known gaps".
+The public answers are, but only root can read them.
 """
 
 from __future__ import annotations
 
 import re
+import secrets
 import shutil
 from pathlib import Path
 
@@ -34,9 +40,13 @@ def build_one(task: Path, out: Path, agent_timeout: int, cpus: int, memory_mb: i
         raise ValueError(f"{task.name} is an MLE-bench competition; refusing to build it as a training task")
     cfg = read_config(task)
     t = out / task.name
+    key = t / "environment" / "score_key"
+    old_key = key.read_text() if key.exists() else None
     if t.exists():
         shutil.rmtree(t)
-    shutil.copytree(TEMPLATE, t)
+    shutil.copytree(TEMPLATE, t, ignore=shutil.ignore_patterns("__pycache__"))
+    key.write_text(old_key or secrets.token_hex(32) + "\n")
+    key.chmod(0o600)
     env, tests = t / "environment", t / "tests"
     link_tree(task / "prepared/public", env / "public")
     for g in (env / "grader", tests / "grader"):
@@ -72,9 +82,9 @@ def build_one(task: Path, out: Path, agent_timeout: int, cpus: int, memory_mb: i
         "reward_args": reward_args,
         "description": desc_f.read_text(errors="replace").strip() if desc_f.exists() else f"Task {task.name}.",
     }
-    for rel in ("task.toml", "instruction.md", "environment/validate", "tests/test.sh", "solution/solve.sh"):
+    for rel in ("task.toml", "instruction.md", "environment/validate.py", "tests/test.sh", "solution/solve.sh"):
         _fill(t / rel, kw)
-    for rel in ("environment/validate", "tests/test.sh", "solution/solve.sh"):
+    for rel in ("environment/bin/validate", "environment/bin/validate-root", "tests/test.sh", "solution/solve.sh"):
         (t / rel).chmod(0o755)
     return t
 

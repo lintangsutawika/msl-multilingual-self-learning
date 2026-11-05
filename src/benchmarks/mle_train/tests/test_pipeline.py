@@ -5,6 +5,7 @@
 """
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -162,12 +163,73 @@ def test_harbor_task_never_ships_private_answers(built):
     assert "leaderboard.csv" not in env_files
     assert (t / "environment/grader/public_answers.csv").exists()
     assert (t / "tests/grader/private_answers.csv").exists() and (t / "tests/grader/leaderboard.csv").exists()
-    for rel in ("task.toml", "instruction.md", "environment/validate", "tests/test.sh", "solution/solve.sh"):
+    for rel in ("task.toml", "instruction.md", "environment/validate.py", "tests/test.sh", "solution/solve.sh"):
         text = (t / rel).read_text()
         for key in ("task_id", "source", "id_column", "reward_args", "description", "sample_submission", "cpus",
                     "hours", "direction", "higher_is_better"):
             assert "{" + key + "}" not in text, f"unfilled {{{key}}} in {rel}"
     assert "**lower is better**" in (t / "instruction.md").read_text()
+
+
+def _load(path: Path, name: str, monkeypatch=None, env: dict | None = None):
+    import importlib.util
+    for k, v in (env or {}).items():
+        monkeypatch.setenv(k, v)
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_validate_locked_down_and_signed(built, tmp_path, monkeypatch, capsys):
+    """The box's validate prints signed scores that the rollout forwarder accepts; forged scores are rejected."""
+    pytest.importorskip("websockets")
+    pytest.importorskip("httpx")
+    t = built["tasks"] / "toy-regression"
+    env = t / "environment"
+    key = env / "score_key"
+    assert key.exists() and (key.stat().st_mode & 0o777) == 0o600
+    assert 'user = "agent"' in (t / "task.toml").read_text()
+    dockerfile = (env / "Dockerfile").read_text()
+    assert "useradd" in dockerfile and "NOPASSWD: /usr/local/bin/validate-root" in dockerfile
+    assert "chmod 700 /opt/grader" in dockerfile
+
+    # Run the root-side validate.py outside the box: point its fixed paths at the built task.
+    v = _load(env / "validate.py", "box_validate")
+    v.GRADER, v.KEY_FILE, v.LOG = str(env / "grader"), str(key), str(tmp_path / "logs/validation_scores.jsonl")
+    v.PROTECTED = (v.GRADER,)
+    sample = pd.read_csv(env / "public/sample_submission.csv")
+
+    def validate(df) -> tuple[int, str]:
+        sub = tmp_path / f"sub{len(list(tmp_path.glob('sub*')))}.csv"
+        df.to_csv(sub, index=False)
+        monkeypatch.setattr(sys, "argv", ["validate.py", str(sub)])
+        rc = v.main()
+        cap = capsys.readouterr()
+        return rc, cap.out.strip(), cap.err.strip()
+
+    rc, good, _ = validate(sample)
+    assert rc == 0 and re.fullmatch(r"score=\S+ sig=[0-9a-f]{16}", good)
+    rc, out, err = validate(sample.head(10))  # missing ids -> invalid: no score line at all (as in MLE-bench)
+    assert rc == 1 and out == "" and "invalid submission" in err
+    monkeypatch.setattr(sys, "argv", ["validate.py", str(env / "grader/public_answers.csv")])
+    assert v.main() == 1 and "protected" in capsys.readouterr().err
+    assert len((tmp_path / "logs/validation_scores.jsonl").read_text().splitlines()) == 1  # only valid scores
+
+    fwd = _load(PKG.parents[2] / "src/relay/node_forwarder.py", "fwd", monkeypatch,
+                {"RELAY_WS_URL": "wss://x", "RELAY_SECRET": "x", "SCORE_KEYS_DIR": str(built["tasks"])})
+    trial = "toy-regression__1105120000r0"
+    acc, rej, signed = fwd._split_scores(trial, good)
+    assert signed and rej == [] and acc == [good.split()[0][len("score="):]]
+    acc, rej, _ = fwd._split_scores(trial, "score=0.0001\nscore=0.0001 sig=0123456789abcdef")
+    assert acc == [] and len(rej) == 2  # the agent printing scores itself gets nothing
+
+
+def test_rebuild_keeps_score_key(built):
+    key = built["tasks"] / "toy-regression/environment/score_key"
+    before = key.read_text()
+    built["run"]("harbor", "--root", built["root"], "--out", built["tasks"])
+    assert key.read_text() == before
 
 
 def test_export_format_and_guard(built, tmp_path):
