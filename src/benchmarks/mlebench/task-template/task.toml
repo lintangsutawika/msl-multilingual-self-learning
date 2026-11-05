@@ -14,6 +14,7 @@ source = "mlebench"
 competition_id = "{comp_id}"
 
 [agent]
+user = "agent"
 timeout_sec = 14400.0
 
 [verifier]
