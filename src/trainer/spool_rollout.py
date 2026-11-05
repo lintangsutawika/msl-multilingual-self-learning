@@ -26,8 +26,9 @@ Env:
     SPOOL_INCLUDE        only trials whose id starts with one of these comma-separated
                          prefixes (default: all trials except probe-/test-)
     SPOOL_MAX_TOKENS     skip sequences longer than this (default 262144, the model's context)
-    SPOOL_MAX_STALENESS  skip calls generated more than this many weight versions
-                         behind the rollout job's current one (default: no limit)
+    SPOOL_MAX_STALENESS  skip episodes with a call generated more than this many weight
+                         versions behind the rollout job's served one (trainer.sh: 10;
+                         versions = trainer step + 1, so this is roughly steps)
     SPOOL_POLL_SECS      poll interval while waiting for a batch (default 30)
     SPOOL_SORT           "longest" = longest sequences first (memory tests); default oldest first
     METRIC_DIRECTIONS    JSON file {competition: "lower"|"higher"}; trials of competitions
@@ -40,7 +41,6 @@ import os
 import time
 from pathlib import Path
 
-from src.episode.mlebench import compute_episode_reward
 
 _REPO = Path(__file__).resolve().parents[2]
 SPOOL_DIR = Path(os.environ.get("SPOOL_DIR", str(_REPO / "runs" / "rollout" / "spool")))
@@ -95,6 +95,18 @@ def _to_score(raw: str) -> float | None:
 def _closed_episodes(records: list[dict], lower_is_better: bool) -> list[tuple[list[dict], float]]:
     """(calls, reward) for every closed episode of a trial, in trial order.
 
+    A call whose new tool output carries a signed score closes the episode made of the calls
+    before it. A signed `score=` line can be replayed (cat of a log, a script printing an old
+    result), and a replay is not a new evaluation: a score already seen in this trial is
+    ignored unless the call it answers (the one whose prompt+response it extends) visibly ran
+    `validate`. (validate run from inside a script is not visible, so new scores are always
+    kept.)
+
+    If one command validated several files (a batch of experiments), the episode is rewarded
+    on the batch AVERAGE (1 if it beats the trial's best so far): padding a batch with weak
+    runs costs reward, so batches of consistently good experiments are what pays. The trial's
+    best then becomes the batch's best file, which the agent really has.
+
     The episode that produces a trial's first usable score is skipped: with no earlier
     best to beat its reward is always 1, so it carries no learning signal. Episodes whose
     validate produced no usable score (broken submission) keep their reward of 0.
@@ -102,16 +114,28 @@ def _closed_episodes(records: list[dict], lower_is_better: bool) -> list[tuple[l
     out: list[tuple[list[dict], float]] = []
     episode: list[dict] = []
     scores: list[float] = []
-    for rec in sorted(records, key=lambda r: r.get("ts", 0)):
-        if rec.get("observed_validate_scores"):
-            seen = [s for s in (_to_score(x) for x in rec["observed_validate_scores"]) if s is not None]
-            reward = 0  # validate ran but produced no usable score
-            if seen:
-                scores.append(seen[-1])
-                reward = compute_episode_reward(scores, lower_is_better=lower_is_better)[-1]
-            if episode and (len(scores) != 1 or not seen):  # skip the first-score episode
-                out.append((episode, float(reward)))
-            episode = []
+    seen_raw: set[str] = set()
+    ordered = sorted(records, key=lambda r: r.get("ts", 0))
+    for i, rec in enumerate(ordered):
+        raw = rec.get("observed_validate_scores") or []
+        if raw:
+            fresh = any(x not in seen_raw for x in raw)
+            if not fresh:
+                parent = next((p for p in reversed(ordered[:i]) if _extends(p, rec)), None)
+                fresh = bool(parent and parent.get("calls_validate"))
+            seen_raw.update(raw)
+            if fresh:
+                seen = [s for s in (_to_score(x) for x in raw) if s is not None]
+                reward = 0  # validate ran but produced no usable score
+                if seen:
+                    mean = sum(seen) / len(seen)
+                    if scores:
+                        best = min(scores) if lower_is_better else max(scores)
+                        reward = int(mean < best if lower_is_better else mean > best)
+                    scores.append(min(seen) if lower_is_better else max(seen))
+                if episode and (len(scores) != 1 or not seen):  # skip the first-score episode
+                    out.append((episode, float(reward)))
+                episode = []
         episode.append(rec)
     return out
 
