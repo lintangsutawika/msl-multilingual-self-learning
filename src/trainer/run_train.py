@@ -53,8 +53,26 @@ def cleanup():
         subprocess.run("pgrep -f '%s' | xargs -r kill 2>/dev/null || true" % t, shell=True)
     time.sleep(3)
 
+def _has_ckpt(d: str) -> bool:
+    return os.path.isfile(os.path.join(d, "latest_checkpointed_iteration.txt"))
+
+
 def execute(args: ScriptArgs):
-    ckpt_args = (f"--hf-checkpoint {args.hf_checkpoint} --ref-load {args.ref_load} --save {args.save_dir} --save-interval {args.save_interval} " + (f"--save-hf {args.save_hf} " if args.save_hf else ""))
+    # Resume: when this run already saved (actor in SAVE, critic in SAVE_critic, MILES's
+    # default), continue from there with optimizer state; MILES starts at the saved rollout
+    # id + 1. Otherwise start fresh: actor from ref_load, critic from the HF checkpoint.
+    # RESUME=0 forces a fresh start.
+    critic_dir = args.save_dir.rstrip("/") + "_critic"
+    resume = os.environ.get("RESUME", "1") == "1" and _has_ckpt(args.save_dir)
+    if resume and not _has_ckpt(critic_dir):
+        raise SystemExit(f"[run_train] actor checkpoint in {args.save_dir} but no critic checkpoint in {critic_dir}")
+    critic_load = critic_dir if resume else args.hf_checkpoint
+    if resume:
+        step = open(os.path.join(args.save_dir, "latest_checkpointed_iteration.txt")).read().strip()
+        print(f"[run_train] resuming from {args.save_dir} (step {step}) and {critic_dir}", flush=True)
+    ckpt_args = (f"--hf-checkpoint {args.hf_checkpoint} --ref-load {args.ref_load} --save {args.save_dir} --save-interval {args.save_interval} "
+                 + (f"--load {args.save_dir} " if resume else "")
+                 + (f"--save-hf {args.save_hf} " if args.save_hf else ""))
     # Long context (episodes reach 150k+ tokens; Qwen3.5-9B allows 262144): context parallelism
     # splits each sequence across CP_SIZE GPUs (MILES passes GDN state between CP ranks);
     # dynamic batching packs samples up to MAX_TOKENS_PER_GPU per micro-batch. Logprobs are
@@ -71,7 +89,7 @@ def execute(args: ScriptArgs):
     # and wrote all-zero weights (2026-11-03). Only an explicit --no-offload-train disables it.
     # Opt back in with OFFLOAD_TRAIN=1.
     offload = "--offload-train " if os.environ.get("OFFLOAD_TRAIN") == "1" else "--no-offload-train "
-    ppo_args = ("--advantage-estimator ppo --critic-load %s %s--use-rollout-logprobs --use-kl-loss --kl-loss-coef 0.01 --kl-loss-type low_var_kl --entropy-coef 0.0 --eps-clip 0.2 --eps-clip-high 0.28 " % (args.hf_checkpoint, offload))
+    ppo_args = ("--advantage-estimator ppo --critic-load %s %s--use-rollout-logprobs --use-kl-loss --kl-loss-coef 0.01 --kl-loss-type low_var_kl --entropy-coef 0.0 --eps-clip 0.2 --eps-clip-high 0.28 " % (critic_load, offload))
     optimizer_args = ("--optimizer adam --lr %s " % os.environ.get("LR", "1e-6") + "--lr-decay-style constant --weight-decay 0.1 --adam-beta1 0.9 --adam-beta2 0.98 ")
     if os.environ.get("ONLINE_MODE"):
         # Online: the trainer never generates. The rollout fn reads closed episodes that the rollout job's

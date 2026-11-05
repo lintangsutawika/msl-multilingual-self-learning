@@ -9,6 +9,10 @@
 #
 # Entry point: src/trainer/run_train.py, bind-mounted over MILES's example run.py; the
 # rollout function is src/trainer/spool_rollout.py.
+#
+# Resume: a job (or a retry attempt) whose RUN_NAME already has checkpoints continues from
+# the last save (actor + critic + optimizer, next step = saved step + 1); resubmit with the
+# same RUN_NAME to continue a run past its walltime. RESUME=0 starts fresh.
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 cd "$REPO_ROOT"
@@ -51,7 +55,7 @@ run_trainer() {
     --env "SPOOL_MAX_TOKENS=${SPOOL_MAX_TOKENS:-160000}" --env "SPOOL_MAX_STALENESS=${SPOOL_MAX_STALENESS:-10}" ${SPOOL_SORT:+--env "SPOOL_SORT=${SPOOL_SORT}"} ${SPOOL_STATE:+--env "SPOOL_STATE=${SPOOL_STATE}"} \
     --env "METRIC_DIRECTIONS=${METRIC_DIRECTIONS:-${MSL_ROOT}/base/metric_directions.json}" \
     --env "HF_BASE_DIR=${HF_BASE_DIR}" --env "KEEP_HF=${KEEP_HF:-3}" --env "KEEP_CKPT=${KEEP_CKPT:-1}" \
-    --env "MODEL=Qwen/Qwen3.5-9B" \
+    --env "MODEL=Qwen/Qwen3.5-9B" --env "RESUME=${RESUME:-1}" \
     --env "MASTER_ADDR=${NODE_IP}" --env "TMPDIR=${LOCAL}" --env "RAY_TMPDIR=${RAY_TMP}" \
     --env "RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE=1" --env "RAY_object_store_memory=5368709120" --env "RAY_raylet_startup_timeout=300" \
     "${MILES_SIF}" bash -c "set -euo pipefail
