@@ -28,6 +28,7 @@
 #   DISPATCH_MAX_CONCURRENT / MAX_ITERATIONS   dispatcher limits (default 2 / 200)
 #   DISPATCH_ROUNDS    passes over DISPATCH_TASKS (default 1; 0 = forever)
 #   CONDENSER_MAX_EVENTS  agent summarizes older history past this many events (default 120; 0 = off)
+#   MAX_GEN_TOKENS     cap on tokens per model call, set by the forwarder (default 16384; 0 = no cap)
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 cd "$REPO_ROOT"
@@ -47,6 +48,7 @@ PORT="${PORT:-30010}"
 MILES_SIF="${MILES_SIF:-/home/aci18914wh/mho-model-harness-optimization/miles.sif}"
 MODEL_PATH="${MODEL_PATH:-/home/aci18914wh/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a}"
 RELAY_APP="${RELAY_APP:-msl-rollout-relay-${JOBTAG}}"
+MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-16384}"
 mkdir -p "$RUN_DIR" "$SPOOL_DIR" "$LOG_DIR"
 log() { echo "[rollout $(date +%H:%M:%S)] $*"; }
 log "job=${JOBTAG} run_dir=${RUN_DIR} model=${MODEL_PATH} port=${PORT}"
@@ -115,7 +117,7 @@ log "relay deployed: ${RELAY_URL}"
 # 3. Forwarder: relay bridge + per-call capture into the shared spool.
 RELAY_WS_URL="wss://${RELAY_URL#https://}/bridge" RELAY_SECRET="$RELAY_SECRET" \
   VLLM_LOCAL_URL="http://127.0.0.1:${PORT}" BACKEND_API_KEY="$API_KEY" \
-  CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" \
+  CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" \
   uv run --with websockets --with httpx python src/relay/node_forwarder.py > "${LOG_DIR}/forwarder.log" 2>&1 &
 FWD_PID=$!; PIDS+=("$FWD_PID")
 
@@ -169,7 +171,7 @@ while true; do
     log "forwarder exited; restarting"
     RELAY_WS_URL="wss://${RELAY_URL#https://}/bridge" RELAY_SECRET="$RELAY_SECRET" \
       VLLM_LOCAL_URL="http://127.0.0.1:${PORT}" BACKEND_API_KEY="$API_KEY" \
-      CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" \
+      CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" \
       uv run --with websockets --with httpx python src/relay/node_forwarder.py >> "${LOG_DIR}/forwarder.log" 2>&1 &
     FWD_PID=$!; PIDS+=("$FWD_PID")
   fi
