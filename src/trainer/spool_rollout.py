@@ -16,15 +16,18 @@ Calls of a still-open episode are not eligible yet.
 The final episode (the calls after the trial's last validate result, or the whole trial
 if it never validated) closes when the task verifier has graded the trial's final
 submission (<trials>/<trial>/*/verifier/grade.json). Its reward is the medal: 1.0 gold,
-0.67 silver, 0.33 bronze, 0 no medal or no valid submission. Most of a trial's time is
-spent after its last validate, and without this that work was never trained.
+0.67 silver, 0.33 bronze, 0.1 a valid submission without a medal, 0 no valid submission.
+Most of a trial's time is spent after its last validate, and without this that work was
+never trained. At most SPOOL_MAX_FINAL_FRAC of a batch comes from final episodes.
 
 Each episode becomes ONE training sequence (the calls' token streams extend each
 other: the next prompt is the previous prompt + response + tool output), with the
 loss on the model's own tokens only. Per-call samples would re-process the whole
 growing prompt for every call (~100x more tokens for the same response tokens).
 
-Contract (LegacyRolloutFnAdapter): plain fn returning list[list[Sample]].
+Contract (LegacyRolloutFnAdapter): plain fn returning RolloutFnTrainOutput (samples +
+batch/* and watchdog/* metrics, which MILES logs to W&B with the step).
+
 
 Env:
     SPOOL_DIR            the rollout job's spool dir (default runs/rollout/spool)
@@ -41,6 +44,8 @@ Env:
                          restart, which once let 25-step-old episodes through (run 3, steps 27-28).
     SPOOL_TRIALS_DIR     the rollout job's harbor trial dirs, for the final grades
                          (default <spool>/../trials)
+    SPOOL_MAX_FINAL_FRAC at most this fraction of a batch from final episodes (default 0.25)
+    SPOOL_WATCHDOG       1 = log watchdog/* behavior metrics of the newest weights (default off)
     SPOOL_POLL_SECS      poll interval while waiting for a batch (default 30)
     SPOOL_SORT           "longest" = longest sequences first (memory tests); default oldest first
     METRIC_DIRECTIONS    JSON file {competition: "lower"|"higher"}; trials of competitions
@@ -64,6 +69,10 @@ MAX_STALENESS = os.environ.get("SPOOL_MAX_STALENESS")
 POLL_SECS = float(os.environ.get("SPOOL_POLL_SECS", "30"))
 TRIALS_DIR = Path(os.environ.get("SPOOL_TRIALS_DIR", str(SPOOL_DIR.parent / "trials")))
 MEDAL_REWARD = {"gold": 1.0, "silver": 0.67, "bronze": 0.33}
+VALID_REWARD = 0.1  # valid final submission without a medal: finishing properly beats quitting
+MAX_FINAL_FRAC = float(os.environ.get("SPOOL_MAX_FINAL_FRAC", "0.25"))
+WATCHDOG = os.environ.get("SPOOL_WATCHDOG") == "1"  # watchdog/* W&B metrics (off: not yet tested at scale)
+WATCHDOG_MIN_CALLS = 200  # don't judge a rate on fewer calls
 _FINAL_IDS: set[str] = set()  # call ids of final episodes (for the batch log)
 _EPISODE_OF: dict[str, str] = {}  # segment's first call id -> its episode's first call id
 
@@ -117,7 +126,7 @@ def _final_reward(trial: str) -> float | None:
             return None  # being written
         if not grade.get("valid_submission") or grade.get("score") is None:
             return 0.0
-        return MEDAL_REWARD.get(grade.get("medal") or "", 0.0)
+        return MEDAL_REWARD.get(grade.get("medal") or "", VALID_REWARD)
     return None
 
 
@@ -296,6 +305,106 @@ def _to_sample(seg: list[dict], reward: float, rollout_id: int, index: int):
     )
 
 
+_SUMMARY_CACHE: dict[str, tuple[int, list[dict]]] = {}  # spool file -> (bytes read, call summaries)
+
+
+def _call_summaries() -> dict[str, list[dict]]:
+    """Per trial, a few fields of each recorded call. Spool files only grow, so each file is
+    read from where the last call stopped (a full re-read of a 12 GB spool took minutes)."""
+    out = {}
+    for f in SPOOL_DIR.glob("*.jsonl"):
+        if not _wanted(f.stem):
+            continue
+        offset, recs = _SUMMARY_CACHE.get(str(f), (0, []))
+        if f.stat().st_size > offset:
+            with open(f, "rb") as fh:
+                fh.seek(offset)
+                chunk = fh.read()
+            end = chunk.rfind(b"\n") + 1  # complete lines only; a partial last line waits
+            for line in chunk[:end].splitlines():
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    continue
+                recs.append({"weight_version": r.get("weight_version"), "validate": bool(r.get("calls_validate")),
+                             "scored": bool(r.get("observed_validate_scores")),
+                             "response_len": len(r.get("response_token_ids") or []),
+                             "truncated": r.get("finish_reason") == "length"})
+            _SUMMARY_CACHE[str(f)] = (offset + end, recs)
+        out[f.stem] = recs
+    return out
+
+
+def _watchdog(step: int) -> dict:
+    """Behavior of the newest weights the rollout job has served (the highest weight_version
+    <= step in the spool), logged to W&B as watchdog/*. Collapses showed up here long before
+    in the training metrics: run 2 in long responses, run 5 in validates (9.2 -> 0.1 per 100
+    calls by step 20, then 1-call trials). watchdog/alarm = 1 when one of them is past its limit."""
+    calls_by_trial: dict[str, int] = {}
+    stats = {"calls": 0, "validates": 0, "scored": 0, "over_8k": 0, "truncated": 0}
+    records_by_trial = _call_summaries()
+    newest = max((r["weight_version"] for recs in records_by_trial.values() for r in recs
+                  if r["weight_version"] is not None and r["weight_version"] <= step), default=-1)
+    graded = valid = medal = 0
+    for trial, recs in records_by_trial.items():
+        mine = [r for r in recs if r.get("weight_version") == newest]
+        if not mine:
+            continue
+        stats["calls"] += len(mine)
+        stats["validates"] += sum(r["validate"] for r in mine)
+        stats["scored"] += sum(r["scored"] for r in mine)
+        stats["over_8k"] += sum(r["response_len"] > 8192 for r in mine)
+        stats["truncated"] += sum(r["truncated"] for r in mine)
+        reward = _final_reward(trial)
+        if reward is not None and len(mine) == len(recs):  # finished, and entirely on these weights
+            calls_by_trial[trial] = len(recs)
+            graded += 1
+            valid += reward > 0
+            medal += reward > VALID_REWARD
+    n = max(stats["calls"], 1)
+    lengths = sorted(calls_by_trial.values())
+    out = {
+        "watchdog/weights_step": newest,
+        "watchdog/calls": stats["calls"],
+        "watchdog/validates_per_100_calls": 100 * stats["validates"] / n,
+        "watchdog/scores_per_100_calls": 100 * stats["scored"] / n,
+        "watchdog/over_8k_frac": stats["over_8k"] / n,
+        "watchdog/truncated_frac": stats["truncated"] / n,
+        "watchdog/finished_trials": graded,
+        "watchdog/median_calls_per_trial": lengths[len(lengths) // 2] if lengths else 0,
+        "watchdog/valid_submission_frac": valid / max(graded, 1),
+        "watchdog/medal_frac": medal / max(graded, 1),
+    }
+    alarms = []
+    if stats["calls"] >= WATCHDOG_MIN_CALLS:
+        if out["watchdog/validates_per_100_calls"] < 1:
+            alarms.append("validates < 1 per 100 calls")
+        if out["watchdog/over_8k_frac"] > 0.005:
+            alarms.append("over 0.5% of responses > 8k tokens")
+    if graded >= 10 and out["watchdog/median_calls_per_trial"] < 10:
+        alarms.append("median trial < 10 calls")
+    out["watchdog/alarm"] = int(bool(alarms))
+    if alarms:
+        _log(f"WATCHDOG step {step} (weights of step {newest}): " + "; ".join(alarms))
+    return out
+
+
+def _select(ready: list, need: int, max_final: int) -> list | None:
+    """The first `need` sequences in order with at most `max_final` from final episodes, or
+    None if there are not enough. Final episodes are long and mostly unrewarded; uncapped they
+    filled whole batches and drowned out the validate episodes (run 5)."""
+    batch, n_final = [], 0
+    for item in ready:
+        if item[0][0]["id"] in _FINAL_IDS:
+            if n_final >= max_final:
+                continue
+            n_final += 1
+        batch.append(item)
+        if len(batch) == need:
+            return batch
+    return None
+
+
 def generate_rollout(args, rollout_id, data_source, evaluation=False):
     """Plain fn form; wrapped by LegacyRolloutFnAdapter. Returns list[list[Sample]]."""
     if evaluation:
@@ -307,17 +416,20 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
         # episodes are up to save_interval - 1 steps old: a smaller limit starves the trainer.
         raise ValueError(f"SPOOL_MAX_STALENESS={MAX_STALENESS} < save interval {save_interval} - 1: "
                          "no episode would be fresh enough in the steps before each publish")
+    max_final = int(need * MAX_FINAL_FRAC)
     consumed = _load_consumed()
     waited = 0.0
     while True:
         ready = _eligible(consumed, int(rollout_id))
-        if len(ready) >= need:
+        batch = _select(ready, need, max_final)
+        if batch is not None:
             break
         if waited % 300 < POLL_SECS:
-            _log(f"rollout {rollout_id}: {len(ready)}/{need} closed-episode sequences in {SPOOL_DIR}; waiting")
+            n_final = sum(seg[0]["id"] in _FINAL_IDS for seg, _ in ready)
+            _log(f"rollout {rollout_id}: {len(ready)} closed-episode sequences ({n_final} final, at most "
+                 f"{max_final} usable) for {need} in {SPOOL_DIR}; waiting")
         time.sleep(POLL_SECS)
         waited += POLL_SECS
-    batch = ready[:need]
     # Sample.rollout_id groups the sequences of one episode: MILES's loss takes a token mean
     # per rollout_id (compact rollouts), so each episode counts once in the batch however
     # many sequences the condenser split it into and however many tokens it has. (With one
@@ -338,4 +450,21 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
          f"{len({seg[0]['trial'] for seg, _ in batch})} trials, mean reward {sum(rewards) / len(rewards):.3f}, "
          f"tokens max {max(lens)} mean {sum(lens) // len(lens)}, generated by weights of steps {steps}, "
          f"rollout serving step {_served_version()}")
-    return groups
+    # Episode-level reward (each episode once; the per-sequence mean counts split episodes
+    # several times) and the batch's make-up, next to the watchdog's behavior metrics.
+    by_episode = {episode_ids[_EPISODE_OF.get(seg[0]["id"], seg[0]["id"])]: (r, seg[0]["id"] in _FINAL_IDS)
+                  for seg, r in batch}
+    validate_eps = [r for r, final in by_episode.values() if not final]
+    final_eps = [r for r, final in by_episode.values() if final]
+    metrics = {
+        "batch/episodes": len(by_episode),
+        "batch/final_episode_frac": len(final_eps) / max(len(by_episode), 1),
+        "batch/validate_episode_reward": sum(validate_eps) / max(len(validate_eps), 1),
+        "batch/final_episode_reward": sum(final_eps) / max(len(final_eps), 1),
+        "batch/truncated_calls": truncated,
+        "batch/staleness_max": int(rollout_id) - min(s for s in steps if s is not None),
+        **(_watchdog(int(rollout_id)) if WATCHDOG else {}),
+    }
+    from miles.rollout.base_types import RolloutFnTrainOutput
+
+    return RolloutFnTrainOutput(samples=groups, metrics=metrics)
