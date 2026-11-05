@@ -13,6 +13,12 @@ closes the episode made of the calls before it; its reward is the binary
 improvement of that score over the trial's best so far (src.episode.mlebench).
 Calls of a still-open episode are not eligible yet.
 
+The final episode (the calls after the trial's last validate result, or the whole trial
+if it never validated) closes when the task verifier has graded the trial's final
+submission (<trials>/<trial>/*/verifier/grade.json). Its reward is the medal: 1.0 gold,
+0.67 silver, 0.33 bronze, 0 no medal or no valid submission. Most of a trial's time is
+spent after its last validate, and without this that work was never trained.
+
 Each episode becomes ONE training sequence (the calls' token streams extend each
 other: the next prompt is the previous prompt + response + tool output), with the
 loss on the model's own tokens only. Per-call samples would re-process the whole
@@ -33,6 +39,8 @@ Env:
                          Measured against the trainer's own step, not the version the rollout
                          job reports serving: that reads 0 for a few minutes after a rollout
                          restart, which once let 25-step-old episodes through (run 3, steps 27-28).
+    SPOOL_TRIALS_DIR     the rollout job's harbor trial dirs, for the final grades
+                         (default <spool>/../trials)
     SPOOL_POLL_SECS      poll interval while waiting for a batch (default 30)
     SPOOL_SORT           "longest" = longest sequences first (memory tests); default oldest first
     METRIC_DIRECTIONS    JSON file {competition: "lower"|"higher"}; trials of competitions
@@ -54,6 +62,9 @@ _EXCLUDE_DEFAULT = ("probe-", "test-")
 MAX_TOKENS = int(os.environ.get("SPOOL_MAX_TOKENS", "262144"))
 MAX_STALENESS = os.environ.get("SPOOL_MAX_STALENESS")
 POLL_SECS = float(os.environ.get("SPOOL_POLL_SECS", "30"))
+TRIALS_DIR = Path(os.environ.get("SPOOL_TRIALS_DIR", str(SPOOL_DIR.parent / "trials")))
+MEDAL_REWARD = {"gold": 1.0, "silver": 0.67, "bronze": 0.33}
+_FINAL_IDS: set[str] = set()  # call ids of final episodes (for the batch log)
 
 
 def _log(msg: str) -> None:
@@ -96,7 +107,21 @@ def _to_score(raw: str) -> float | None:
     return v if v == v and v not in (float("inf"), float("-inf")) else None
 
 
-def _closed_episodes(records: list[dict], lower_is_better: bool) -> list[tuple[list[dict], float]]:
+def _final_reward(trial: str) -> float | None:
+    """Medal reward of the trial's graded final submission, or None while it is not graded."""
+    for g in TRIALS_DIR.glob(f"{trial}/*/verifier/grade.json"):
+        try:
+            grade = json.loads(g.read_text())
+        except Exception:
+            return None  # being written
+        if not grade.get("valid_submission") or grade.get("score") is None:
+            return 0.0
+        return MEDAL_REWARD.get(grade.get("medal") or "", 0.0)
+    return None
+
+
+def _closed_episodes(records: list[dict], lower_is_better: bool,
+                     final_reward: float | None = None) -> list[tuple[list[dict], float]]:
     """(calls, reward) for every closed episode of a trial, in trial order.
 
     A call whose new tool output carries a signed score closes the episode made of the calls
@@ -119,6 +144,10 @@ def _closed_episodes(records: list[dict], lower_is_better: bool) -> list[tuple[l
     rollout job's MAX_GEN_TOKENS) gets reward 0 whatever its score: a runaway response
     (e.g. a repetition loop) must not be reinforced by a lucky validate after it.
     The score still counts toward the trial's best.
+
+    With final_reward (the graded final submission's medal reward), the calls after the last
+    validate result (the whole trial if there was none) form a closed final episode with
+    that reward (0 if it hit the generation cap).
     """
     out: list[tuple[list[dict], float]] = []
     episode: list[dict] = []
@@ -148,6 +177,9 @@ def _closed_episodes(records: list[dict], lower_is_better: bool) -> list[tuple[l
                     out.append((episode, float(reward)))
                 episode = []
         episode.append(rec)
+    if final_reward is not None and episode:
+        truncated = any(c.get("finish_reason") == "length" for c in episode)
+        out.append((episode, 0.0 if truncated else float(final_reward)))
     return out
 
 
@@ -191,7 +223,11 @@ def _eligible(consumed: set[str], step: int) -> list[tuple[list[dict], float]]:
                 records.append(json.loads(line))
             except Exception:
                 continue  # a partially written last line
-        for calls, reward in _closed_episodes(records, direction == "lower"):
+        final = _final_reward(trial)
+        episodes = _closed_episodes(records, direction == "lower", final)
+        if final is not None and episodes:
+            _FINAL_IDS.update(c["id"] for c in episodes[-1][0])
+        for calls, reward in episodes:
             for seg in _segments(calls):
                 if seg[0]["id"] in consumed:
                     continue
@@ -288,7 +324,7 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
     lens = [_seq_len(seg) for seg, _ in batch]
     truncated = sum(c.get("finish_reason") == "length" for seg, _ in batch for c in seg)
     _log(f"rollout {rollout_id}: {len(batch)} sequences ({sum(len(seg) for seg, _ in batch)} calls, "
-         f"{truncated} truncated) from "
+         f"{truncated} truncated; {sum(seg[0]['id'] in _FINAL_IDS for seg, _ in batch)} from final episodes) from "
          f"{len({seg[0]['trial'] for seg, _ in batch})} trials, mean reward {sum(rewards) / len(rewards):.3f}, "
          f"tokens max {max(lens)} mean {sum(lens) // len(lens)}, generated by weights of steps {steps}, "
          f"rollout serving step {_served_version()}")
