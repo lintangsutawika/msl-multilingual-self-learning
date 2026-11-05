@@ -23,6 +23,7 @@ import zlib
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from common import GRADER_SRC, find_sample, is_mlebench, link_file, link_tree, write_config
 
@@ -80,6 +81,10 @@ def _download_kaggle(dojo_repo: Path, data_dir: Path, max_gb: float, competition
     sys.path[:0] = [str(dojo_repo), str(dojo_repo / "prepare")]
     from mle import prepare_competition  # MLE-Dojo's own downloader + per-competition prepare.py
 
+    # pandas 3 backs string columns with pyarrow when it is installed (wsdm-cup needs it to read parquet), and
+    # sklearn's train_test_split can't index those arrays, which breaks e.g. nbme-score-clinical-patient-notes.
+    # Python-backed strings are what the prepare scripts were written against.
+    pd.set_option("mode.string_storage", "python")
     kdir = data_dir / "kaggle"
     logs = kdir / "_logs"
     logs.mkdir(parents=True, exist_ok=True)
