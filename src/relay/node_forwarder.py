@@ -293,7 +293,7 @@ async def main() -> None:
     if CAPTURE_DIR:
         os.makedirs(CAPTURE_DIR, exist_ok=True)
         log(f"capturing chat completions -> {CAPTURE_DIR} (version file: {WEIGHT_VERSION_FILE or 'none'})")
-    async with httpx.AsyncClient(timeout=600.0) as client:
+    async with httpx.AsyncClient(timeout=float(os.environ.get("RELAY_REQUEST_TIMEOUT", "600"))) as client:
         while True:
             try:
                 async with websockets.connect(

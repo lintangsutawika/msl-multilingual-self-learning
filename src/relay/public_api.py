@@ -49,7 +49,12 @@ SECRET_NAME = os.environ.get("RELAY_SECRET_NAME", "mho-relay")
 # no `modal secret create` step is needed. Otherwise fall back to a named Modal
 # secret (the stable shared relay uses `tts-relay`).
 if os.environ.get("RELAY_SECRET"):
-    _relay_secret = modal.Secret.from_dict({"RELAY_SECRET": os.environ["RELAY_SECRET"]})
+    _relay_secret = modal.Secret.from_dict({
+        "RELAY_SECRET": os.environ["RELAY_SECRET"],
+        # Optional per-request wait (s) baked into the app; unset keeps the 600 s default.
+        **({"RELAY_REQUEST_TIMEOUT": os.environ["RELAY_REQUEST_TIMEOUT"]}
+           if os.environ.get("RELAY_REQUEST_TIMEOUT") else {}),
+    })
 else:
     _relay_secret = modal.Secret.from_name(SECRET_NAME)
 
@@ -174,7 +179,7 @@ def web():
         async with send_lock:
             await ws.send_text(payload)
         try:
-            resp = await asyncio.wait_for(fut, timeout=600)
+            resp = await asyncio.wait_for(fut, timeout=float(os.environ.get("RELAY_REQUEST_TIMEOUT", "600")))
         except asyncio.TimeoutError:
             pending.pop(rid, None)
             raise HTTPException(status_code=504, detail="relay timeout waiting for node")
