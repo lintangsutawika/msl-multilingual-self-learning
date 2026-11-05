@@ -110,6 +110,11 @@ def _closed_episodes(records: list[dict], lower_is_better: bool) -> list[tuple[l
     The episode that produces a trial's first usable score is skipped: with no earlier
     best to beat its reward is always 1, so it carries no learning signal. Episodes whose
     validate produced no usable score (broken submission) keep their reward of 0.
+
+    An episode with a call that hit the generation cap (finish_reason "length", the
+    rollout job's MAX_GEN_TOKENS) gets reward 0 whatever its score: a runaway response
+    (e.g. a repetition loop) must not be reinforced by a lucky validate after it.
+    The score still counts toward the trial's best.
     """
     out: list[tuple[list[dict], float]] = []
     episode: list[dict] = []
@@ -133,6 +138,8 @@ def _closed_episodes(records: list[dict], lower_is_better: bool) -> list[tuple[l
                         best = min(scores) if lower_is_better else max(scores)
                         reward = int(mean < best if lower_is_better else mean > best)
                     scores.append(min(seen) if lower_is_better else max(seen))
+                if any(c.get("finish_reason") == "length" for c in episode):
+                    reward = 0
                 if episode and (len(scores) != 1 or not seen):  # skip the first-score episode
                     out.append((episode, float(reward)))
                 episode = []
@@ -270,7 +277,9 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
     rewards = [r for _, r in batch]
     versions = sorted({c.get("weight_version") for seg, _ in batch for c in seg}, key=lambda v: (v is None, v))
     lens = [_seq_len(seg) for seg, _ in batch]
-    _log(f"rollout {rollout_id}: {len(batch)} sequences ({sum(len(seg) for seg, _ in batch)} calls) from "
+    truncated = sum(c.get("finish_reason") == "length" for seg, _ in batch for c in seg)
+    _log(f"rollout {rollout_id}: {len(batch)} sequences ({sum(len(seg) for seg, _ in batch)} calls, "
+         f"{truncated} truncated) from "
          f"{len({seg[0]['trial'] for seg, _ in batch})} trials, mean reward {sum(rewards) / len(rewards):.3f}, "
          f"tokens max {max(lens)} mean {sum(lens) // len(lens)}, weight versions {versions}, served {_served_version()}")
     return groups
