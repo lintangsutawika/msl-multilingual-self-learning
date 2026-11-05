@@ -69,7 +69,9 @@ PIDS=()
 cleanup() {
   log "shutting down (stopping relay app ${RELAY_APP})"
   for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  uv run modal app stop "${RELAY_APP}" >/dev/null 2>&1 || true
+  # -y: without a terminal `modal app stop` asks for confirmation and aborts, which
+  # left the app (and its pinned container) running.
+  uv run modal app stop -y "${RELAY_APP}" >/dev/null 2>&1 || log "could not stop relay app ${RELAY_APP}; stop it by hand"
   rm -f "${RUN_DIR}/endpoint.env"
 }
 trap cleanup EXIT TERM INT
