@@ -7,7 +7,7 @@ OUT but cannot accept inbound, so Modal sandboxes can't reach it directly.
 
 This relay is the public rendezvous: it exposes an OpenAI-compatible HTTPS
 endpoint (what the agent calls) and a WebSocket the node dials out to and holds
-open (harbor/relay/bridge.py). Requests arriving on HTTP are forwarded over the
+open (harbor/relay/node_forwarder.py). Requests arriving on HTTP are forwarded over the
 WebSocket to the node, which proxies them to its local vLLM and returns the
 response. Everything lives in *your* Modal account — no third-party tunnel.
 
@@ -49,7 +49,12 @@ SECRET_NAME = os.environ.get("RELAY_SECRET_NAME", "mho-relay")
 # no `modal secret create` step is needed. Otherwise fall back to a named Modal
 # secret (the stable shared relay uses `tts-relay`).
 if os.environ.get("RELAY_SECRET"):
-    _relay_secret = modal.Secret.from_dict({"RELAY_SECRET": os.environ["RELAY_SECRET"]})
+    _relay_secret = modal.Secret.from_dict({
+        "RELAY_SECRET": os.environ["RELAY_SECRET"],
+        # Optional per-request wait (s) baked into the app; unset keeps the 600 s default.
+        **({"RELAY_REQUEST_TIMEOUT": os.environ["RELAY_REQUEST_TIMEOUT"]}
+           if os.environ.get("RELAY_REQUEST_TIMEOUT") else {}),
+    })
 else:
     _relay_secret = modal.Secret.from_name(SECRET_NAME)
 
@@ -82,7 +87,11 @@ image = modal.Image.debian_slim().pip_install("fastapi==0.115.*", "websockets>=1
     # large SWE-bench payloads and missed the bridge's WebSocket keepalive, so the
     # bridge tore the socket down (1011) and every in-flight request was lost.
     # Give the loop real cores so it can pong on time and forward without stalling.
-    cpu=4.0,
+    # The singleton container must be rescheduled whenever Modal recycles it, and a
+    # large request can wait a long time for capacity ("waiting to be scheduled on a
+    # CPU worker"), so ask for only what the load needs: RELAY_CPU at deploy time
+    # (default 1; 8 concurrent MLE-Bench trials need far less than SWE-bench fan-in).
+    cpu=float(os.environ.get("RELAY_CPU", "1.0")),
     secrets=[_relay_secret],
 )
 @modal.concurrent(max_inputs=64)  # many concurrent agents multiplexed over one WS
@@ -130,16 +139,34 @@ def web():
 
     @api.api_route("/v1/{path:path}", methods=["GET", "POST"])
     async def proxy(path: str, request: Request):
+        return await _proxy_frame(f"/v1/{path}", request)
+
+    # Session-aware path: MILES's session server serves the agent at
+    # /sessions/<id>/v1/<path> (per-session token accounting). Forward the FULL
+    # session path so the node bridge routes to the session server unchanged.
+    @api.api_route("/sessions/{session_id}/v1/{path:path}", methods=["GET", "POST"])
+    async def proxy_session(session_id: str, path: str, request: Request):
+        return await _proxy_frame(f"/sessions/{session_id}/v1/{path}", request)
+
+    # Live episode push (separated loop): the in-sandbox runner POSTs sealed episodes
+    # here; the forwarder routes /episodes/* to node A's receiver (not the model).
+    @api.api_route("/episodes/{trial_id}/{episode_index}", methods=["POST"])
+    async def proxy_episode(trial_id: str, episode_index: str, request: Request):
+        return await _proxy_frame(f"/episodes/{trial_id}/{episode_index}", request)
+
+    def _proxy_frame(forward_path: str, request: Request):
+        return _proxy_impl(forward_path, request, secret, ws=bridge_ws["ws"], pending=pending, send_lock=send_lock)
+
+    async def _proxy_impl(forward_path: str, request: Request, secret, ws, pending, send_lock):
         if request.headers.get("authorization") != f"Bearer {secret}":
             raise HTTPException(status_code=401, detail="bad relay token")
-        ws = bridge_ws["ws"]
         if ws is None:
-            raise HTTPException(status_code=503, detail="no vLLM bridge connected")
+            raise HTTPException(status_code=503, detail="no bridge connected")
         rid = uuid.uuid4().hex
         frame = {
             "id": rid,
             "method": request.method,
-            "path": f"/v1/{path}",
+            "path": forward_path,
             "query": request.url.query or "",
             "body": (await request.body()).decode(),
         }
@@ -152,7 +179,7 @@ def web():
         async with send_lock:
             await ws.send_text(payload)
         try:
-            resp = await asyncio.wait_for(fut, timeout=600)
+            resp = await asyncio.wait_for(fut, timeout=float(os.environ.get("RELAY_REQUEST_TIMEOUT", "600")))
         except asyncio.TimeoutError:
             pending.pop(rid, None)
             raise HTTPException(status_code=504, detail="relay timeout waiting for node")

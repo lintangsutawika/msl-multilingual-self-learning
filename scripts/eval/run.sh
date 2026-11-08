@@ -96,7 +96,7 @@ fi
 # Deterministic JOB_NAME so a resume works across walltime chunks AND RUN=0,1,2,...
 # gives repeat (non-colliding) runs of the same data+model. Derived from TASK_PATH
 # (dataset slug = FULL TASK_PATH, / -> --) + MODEL (bare, / -> --). Set JOB_NAME to override.
-RUN="${RUN:-0}"
+RUN="${RUN:-$(( ${PBS_ARRAY_INDEX:-1} - 1 ))}"
 _DATASET_SLUG="${TASK_PATH%/}"
 _DATASET_SLUG="${_DATASET_SLUG#./}"
 _DATASET_SLUG="${_DATASET_SLUG#/}"
