@@ -48,6 +48,16 @@ def link_tree(src: Path, dst: Path, skip: set[str] = frozenset()) -> None:
             link_file(p, dst / p.relative_to(src))
 
 
+OVERRIDES_FILE = HERE / "task_overrides.yaml"
+
+
+def task_overrides() -> dict:
+    """task_overrides.yaml: {"drop_test_columns": {task: [cols]}, "exclude": {task: reason}}."""
+    d = yaml.safe_load(OVERRIDES_FILE.read_text()) if OVERRIDES_FILE.exists() else None
+    d = d or {}
+    return {"drop_test_columns": d.get("drop_test_columns") or {}, "exclude": d.get("exclude") or {}}
+
+
 def read_config(task: Path) -> dict:
     return yaml.safe_load((task / "config.yaml").read_text()) or {}
 

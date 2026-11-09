@@ -253,7 +253,7 @@ def test_leak_check(tmp_path):
     assert split._leak(ans, const, "id") is None
     copy = tmp_path / "copy.csv"
     ans.to_csv(copy, index=False)
-    assert split._leak(ans, copy, "id") == "copy.csv contains the answers"
+    assert split._leak(ans, copy, "id").startswith("copy.csv contains the answers")
     keys = pd.DataFrame({"id": range(1000), "img": np.arange(1000) // 30, "loc": np.random.RandomState(1).rand(1000)})
     keyed_sample = tmp_path / "keyed_sample.csv"
     keys.assign(loc=0).to_csv(keyed_sample, index=False)  # key column repeated by design, target all zero
@@ -303,3 +303,28 @@ def test_verifier_writes_grade_json_for_trainer(built, tmp_path, offset, medal):
     assert r.returncode == 0, r.stderr
     want = {"gold": 1.0, "silver": 0.67, "bronze": 0.33}.get(medal, 0.1 if offset is not None else 0.0)
     assert float(r.stdout.strip().splitlines()[-1]) == want
+
+
+def test_leak_check_renamed_columns(tmp_path):
+    """Answers hidden under other names are leaks (quora: id vs test_id; bnp: target vs PredictedProb)."""
+    rng = np.random.RandomState(0)
+    ans = pd.DataFrame({"test_id": range(500), "is_duplicate": rng.randint(0, 2, 500)})
+    quora = tmp_path / "test.csv"  # the test ids under another name, plus the answer column
+    pd.DataFrame({"id": range(500), "q": ["x"] * 500, "is_duplicate": ans.is_duplicate}).to_csv(quora, index=False)
+    assert "contains the answers" in split._leak(ans, quora, "test_id")
+    probs = pd.DataFrame({"ID": range(500), "PredictedProb": rng.randint(0, 2, 500)})
+    bnp = tmp_path / "bnp_test.csv"
+    pd.DataFrame({"ID": range(500), "target": probs.PredictedProb, "v1": rng.rand(500)}).to_csv(bnp, index=False)
+    assert "'target'" in split._leak(probs, bnp, "ID")
+    clean = tmp_path / "clean.csv"  # features only: no column reproduces the answers
+    pd.DataFrame({"ID": range(500), "v1": rng.rand(500), "v2": rng.randint(0, 2, 500)}).to_csv(clean, index=False)
+    assert split._leak(probs, clean, "ID") is None
+
+
+def test_drop_test_columns(tmp_path):
+    t = tmp_path / "test.csv"
+    t.write_text("RowId,City,Target_p20,x\n1,Boston,3.5,0.10\n2,Atlanta,0.0,1e-05\n")
+    split._drop_test_columns(tmp_path, ["Target_p20", "absent"])
+    assert t.read_text() == "RowId,City,x\n1,Boston,0.10\n2,Atlanta,1e-05\n"  # other values untouched as text
+    split._drop_test_columns(tmp_path, ["Target_p20"])  # idempotent
+    assert t.read_text().startswith("RowId,City,x\n")

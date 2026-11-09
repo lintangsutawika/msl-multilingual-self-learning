@@ -17,7 +17,9 @@ Results go into each config.yaml and into <root>/index.tsv.
 
 from __future__ import annotations
 
+import csv
 import json
+import os
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -26,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from common import GRADER_SRC, PUBLIC_FRAC, SEED, dir_mb, read_config, task_dirs, write_config
+from common import GRADER_SRC, PUBLIC_FRAC, SEED, dir_mb, read_config, task_dirs, task_overrides, write_config
 
 INDEX_COLS = ["task", "source", "usable", "reason", "modality", "higher_is_better", "id_column", "test_ids",
               "public_ids", "private_ids", "public_mb", "public_files", "public_sample", "public_perfect",
@@ -52,26 +54,70 @@ def grade(task: Path, answers: Path, submission: Path, id_col: str, leaderboard:
         return {"valid": False, "score": None, "error": f"{type(e).__name__}: {e}"[:300]}
 
 
-def _leak(ans: pd.DataFrame, other: Path, id_col: str) -> str | None:
-    """Return a reason if `other` (a public CSV) reproduces the answers for the same ids.
+def _informative(s: pd.Series) -> bool:
+    return s.nunique(dropna=True) > 1
 
-    It leaks if every shared column matches and at least one of them is not constant. Constant columns alone never
-    count: an all-zero sample submission matches a 99.8%-zero target by coincidence. Key columns that are repeated
-    by design (e.g. ImageId, FeatureName next to an all-zero Location) don't count either, because the constant
-    target column does not match."""
+
+def _leak(ans: pd.DataFrame, other: Path, id_col: str) -> str | None:
+    """Return a reason if `other` (a public CSV) holds the answers for the same rows.
+
+    The rows are joined on the answers' id column, or on any column of `other` with exactly the answers' ids under
+    another name (quora: `id` vs `test_id`). Every answer column is compared with every column of `other`, whatever
+    its name (bnp: `target` vs `PredictedProb`); a match on more than 99% of rows leaks. Constant columns never count:
+    an all-zero sample submission matches a 99.8%-zero target by coincidence, and key columns repeated by design
+    (e.g. ImageId next to an all-zero Location) are not informative either. Answers in another layout than the
+    public file (bigquery: RowId_k rows vs one column per target) are not caught here: see task_overrides.yaml."""
     try:
-        o = pd.read_csv(other)
+        o = pd.read_csv(other, low_memory=False)
     except Exception:
         return None
-    shared = [c for c in ans.columns if c != id_col and c in o.columns]
-    if not shared or id_col not in o.columns or len(o) != len(ans):
+    if len(o) != len(ans):
         return None
-    m = ans.merge(o, on=id_col, suffixes=("", "__o"))
+    ids = ans[id_col].astype(str)
+    key = id_col if id_col in o.columns else next(
+        (c for c in o.columns if o[c].nunique() == len(o) and set(o[c].astype(str)) == set(ids)), None)
+    if key is None:
+        return None
+    m = ans.merge(o.rename(columns={key: id_col}) if key != id_col else o, on=id_col, suffixes=("", "__o"))
     if len(m) != len(ans):
         return None
-    all_match = all((m[c].astype(str) == m[f"{c}__o"].astype(str)).mean() > 0.99 for c in shared)
-    informative = any(o[c].nunique(dropna=False) > 1 for c in shared)
-    return f"{other.name} contains the answers" if all_match and informative else None
+    def same(df, a, b):
+        x, y = df[a], df[b]
+        xn, yn = pd.to_numeric(x, errors="coerce"), pd.to_numeric(y, errors="coerce")
+        if xn.notna().all() and yn.notna().all():
+            return float(np.isclose(xn, yn, rtol=1e-9, atol=1e-12).mean())
+        return float((x.astype(str) == y.astype(str)).mean())
+
+    # Same-named columns: a leak only if ALL of them match (key columns repeated by design match on their own).
+    shared = [c for c in ans.columns if c != id_col and c in o.columns and c != key]
+    if shared and all(same(m, c, f"{c}__o") > 0.99 for c in shared) and any(_informative(o[c]) for c in shared):
+        return f"{other.name} contains the answers (columns {shared})"
+    # Answer columns the file lacks by name, against the file's columns the answers lack: the same values under
+    # another name (bnp: target vs PredictedProb).
+    targets = [c for c in ans.columns if c != id_col and c not in o.columns and _informative(ans[c])]
+    cand = [c for c in o.columns if c != key and c not in ans.columns and _informative(o[c])]
+    sample = m.sample(n=min(len(m), 2000), random_state=0)
+    for t in targets:
+        for c in cand:
+            if same(sample, t, c) > 0.99 and same(m, t, c) > 0.99:
+                return f"{other.name} contains the answers (column {c!r} = {t!r})"
+    return None
+
+
+def _drop_test_columns(pub_dir: Path, cols: list[str]) -> None:
+    """Remove `cols` from pub_dir/test.csv (task_overrides.yaml), text otherwise unchanged; no-op once removed."""
+    test = pub_dir / "test.csv"
+    with open(test, newline="") as f:
+        header = next(csv.reader(f))
+    drop = {i for i, c in enumerate(header) if c in set(cols)}
+    if not drop:
+        return
+    tmp = test.with_suffix(".csv.tmp")
+    with open(test, newline="") as f, open(tmp, "w", newline="") as g:
+        w = csv.writer(g)
+        for row in csv.reader(f):
+            w.writerow([v for i, v in enumerate(row) if i not in drop])
+    os.replace(tmp, test)  # a new file: hardlinked copies (built tasks) keep the old one until rebuilt
 
 
 MEDIA = {"image": {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".dcm", ".webp"},
@@ -113,8 +159,11 @@ def lb_direction_ok(lb: Path, hib: bool) -> bool | None:
 def split_one(task: Path, min_public_ids: int) -> dict:
     cfg = read_config(task)
     row = {"task": task.name, "source": cfg.get("source"), "usable": False, "reason": "", "error": ""}
+    overrides = task_overrides()
     try:
         pub_dir, priv_dir = task / "prepared/public", task / "prepared/private"
+        if task.name in overrides["drop_test_columns"]:
+            _drop_test_columns(pub_dir, overrides["drop_test_columns"][task.name])
         ans = pd.read_csv(priv_dir / "answers.csv")
         sample = pub_dir / cfg["sample_submission"]
         sample_cols = list(pd.read_csv(sample, nrows=0).columns)
@@ -154,7 +203,9 @@ def split_one(task: Path, min_public_ids: int) -> dict:
             p, q = row[f"{s}_perfect"], row[f"{s}_sample"]
             return p is not None and q is not None and (p > q if hib else p < q)
 
-        if leak:
+        if task.name in overrides["exclude"]:
+            row["reason"] = "excluded (task_overrides.yaml): " + " ".join(str(overrides["exclude"][task.name]).split())
+        elif leak:
             row["reason"] = leak
         elif None in (row["public_sample"], row["public_perfect"], row["private_sample"], row["private_perfect"]):
             row["reason"] = "grading failed"
