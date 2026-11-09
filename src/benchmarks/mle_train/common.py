@@ -23,7 +23,7 @@ HERE = Path(__file__).resolve().parent
 GRADER_SRC = HERE / "grader"
 TEMPLATE = HERE / "task-template"
 
-PUBLIC_FRAC = 0.3
+PUBLIC_FRAC = 0.5  # half the test ids score `validate` (the training signal), half the final grade
 SEED = 0
 
 # Files never copied into prepared/public (answers or graders shipped next to the data by some sources).

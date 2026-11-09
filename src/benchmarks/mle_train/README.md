@@ -7,12 +7,12 @@ excluded**.
 
 How a task works:
 - During the run the agent calls `validate <file.csv>`. It scores the file on the **public** split, a fixed random
-  30% of the test ids, and logs the score. These scores are the per-episode signal: an episode is the agent steps
+  half of the test ids, and logs the score. These scores are the per-episode signal: an episode is the agent steps
   between two `validate` calls.
 - The agent runs as the unprivileged user `agent`. `validate` reaches the root-only grader and public answers
   through one `sudo` rule and prints a signed `score=<s> sig=<hmac>` line (HMAC with the task's
   `environment/score_key`). The rollout forwarder only trusts signed scores (`SCORE_KEYS_DIR` = the tasks folder).
-- After the run, the verifier grades `/workspace/predictions.csv` on the **private** split, the other 70%. The reward
+- After the run, the verifier grades `/workspace/predictions.csv` on the **private** split, the other half. The reward
   is the submission's position on the competition's real Kaggle private leaderboard, in [0, 1].
 
 The agent always predicts every test row; each split only scores its own ids, as on Kaggle.
@@ -177,7 +177,7 @@ ROOT/<task_id>/
 
 ## Split and quality checks (`split`)
 
-The test ids are sorted, then shuffled with seed 0, and 30% become the public split. The split doesn't depend on
+The test ids are sorted, then shuffled with seed 0, and half become the public split (`PUBLIC_FRAC` in `common.py`; 50% rather than Kaggle's usual 20-30%, because the public scores are the training signal and a small public split makes "improved on my best" mostly noise). The split doesn't depend on
 file order or library version, and ids with several rows stay together.
 
 Each task runs in its own process, so a crash or out-of-memory kill fails only that task.
@@ -204,7 +204,7 @@ TASKS/<task_id>/
   environment/            Dockerfile (grading packages pinned as in requirements.txt; agent user, sudo rule),
                           bin/validate + bin/validate-root + validate.py (signed scores), score_key (kept across
                           rebuilds), grader + public_answers.csv (root-only in the box), public data (hardlinked)
-  tests/                  test.sh (private grading -> reward.txt, final_score.json), grader, private answers,
+  tests/                  test.sh (private grading -> reward.txt, final_score.json, grade.json), grader, private answers,
                           leaderboard
   solution/solve.sh       oracle: submits the sample submission
 ```
@@ -215,9 +215,26 @@ agent's box.
 The reward is the fraction of the Kaggle private leaderboard the submission beats or ties, so it respects the
 metric direction. A missing or invalid submission gets 0, with the reason in `final_score.json`.
 
-`export` writes the files `src/run_training.py` (Miles) reads:
-- `HARBOR_TASKS_DIR` = the tasks folder;
-- `--prompt-data` = `train.jsonl`, one line per task: `{"prompt": <instruction.md>, "metadata": {"instance_id": <task>, "source": ...}}`.
+`grade.json` has the MLE-bench template's format (`score`, `valid_submission`, `medal`, thresholds,
+`is_lower_better`). The medal uses MLE-bench's `rank_score` (Kaggle's medal rules by team count) on the same
+leaderboard. The trainer (`src/trainer/spool_rollout.py`) rewards the final episode, the calls after the last
+`validate`, with it: gold 1.0, silver 0.67, bronze 0.33, a valid submission without a medal 0.1, otherwise 0.
+
+`export --out DATA/train.jsonl` writes what the msl training pipeline (`scripts/rollout.sh` + `scripts/trainer.sh`)
+reads:
+- `train.jsonl` (trainer `PROMPT_DATA`), one line per task: `{"prompt": <instruction.md>, "metadata": {"instance_id": <task>, "source": ...}}`;
+- `metric_directions.json` (trainer `METRIC_DIRECTIONS`), `{task: "higher"|"lower"}`; the trainer drops trials of
+  tasks that are not listed;
+- `train.dispatch.txt`, all tasks on one comma-separated line (rollout `DISPATCH_TASKS`);
+- `train.<source>.txt`, per-source task lists (for `oracle_check.sbatch INCLUDE=...`).
+
+The rollout job also needs the tasks folder twice: as the dispatcher's `--tasks-dir`, and as the forwarder's
+`SCORE_KEYS_DIR`, which checks each `validate` signature with `<task>/environment/score_key`.
+
+Two Slurm scripts in `slurm/` run the tasks on SAIL sandboxes (`sail auth login` first):
+- `oracle_check.sbatch`: no model; the oracle submits the sample submission and calls `validate` once per task.
+- `agent_eval_sail.sbatch`: a real agent (openhands-sdk) in SAIL, Qwen3.5-9B served by vLLM on one Babel GPU,
+  reached through a per-job Modal relay; prints each trial's reward and the signed `validate` scores recorded.
 
 ## Known limitations and open decisions
 

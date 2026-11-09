@@ -11,8 +11,11 @@ passed to grade(). Rows for other ids are ignored; a missing id makes the submis
     grade_cli.py --grader-dir DIR --answers split.csv --submission sub.csv [--id-column ID]
                  [--leaderboard lb.csv | --baseline S0 --ceiling S1]
 
-Output: {"valid", "score", "higher_is_better", "rows", "error", "position_score", "normalized_score", "reward"}
+Output: {"valid", "score", "higher_is_better", "rows", "error", "position_score", "normalized_score", "reward",
+          "medal", "gold_threshold", "silver_threshold", "bronze_threshold", "median_threshold", "above_median"}
 - position_score: fraction of the leaderboard beaten or tied (MLE-Dojo's position score), if --leaderboard.
+- medal ("gold"|"silver"|"bronze"|"none") and the thresholds: MLE-bench's rank_score (mlebench/grade_helpers.py,
+  Kaggle's medal rules by team count) on the leaderboard, if --leaderboard; medal is "none" for an invalid submission.
 - normalized_score: (score - baseline) / (ceiling - baseline) clipped to [0, 1], direction-aware, if given.
 - reward: position_score if available, else normalized_score, else 1.0 for any valid submission; 0 if invalid.
 """
@@ -46,6 +49,42 @@ def position(score: float, lb: str, hib: bool) -> float | None:
     return float((s <= score).sum() if hib else (s >= score).sum()) / len(s)
 
 
+def medal_info(score: float | None, lb: str, hib: bool) -> dict:
+    """MLE-bench's Grader.rank_score (mlebench/grade_helpers.py), with the same Kaggle thresholds. The leaderboard is
+    in rank order (best first); the direction is the task's HIGHER_IS_BETTER, which split.py checked agrees with the
+    leaderboard's own order (MLE-bench infers it from that order)."""
+    d = pd.read_csv(lb)
+    if "rank" in d.columns:
+        d = d.sort_values("rank", kind="stable")
+    scores = pd.to_numeric(d["score"] if "score" in d.columns else d.iloc[:, 1], errors="coerce").dropna()
+    scores = scores.reset_index(drop=True)
+    n = len(scores)
+
+    def at(pos: int) -> float:
+        if pos - 1 >= n or pos < 1:
+            raise IndexError("Position out of bounds in the leaderboard.")
+        return float(scores.iloc[pos - 1])
+
+    if 1 <= n < 100:
+        g, s_, b = at(max(1, int(n * 0.1))), at(max(1, int(n * 0.2))), at(max(1, int(n * 0.4)))
+    elif 100 <= n < 250:
+        g, s_, b = at(10), at(max(1, int(n * 0.2))), at(max(1, int(n * 0.4)))
+    elif 250 <= n < 1000:
+        g, s_, b = at(10 + int(n * 0.002)), at(50), at(100)
+    elif n >= 1000:
+        g, s_, b = at(10 + int(n * 0.002)), at(max(1, int(n * 0.05))), at(max(1, int(n * 0.1)))
+    else:
+        raise ValueError("Number of teams in leaderboard must be greater than 0.")
+    out = {"gold_threshold": g, "silver_threshold": s_, "bronze_threshold": b,
+           "median_threshold": float(scores.median()), "medal": "none", "above_median": False}
+    if score is None:
+        return out
+    beats = (lambda t: score >= t) if hib else (lambda t: score <= t)
+    out["medal"] = "gold" if beats(g) else "silver" if beats(s_) else "bronze" if beats(b) else "none"
+    out["above_median"] = bool(score > out["median_threshold"] if hib else score < out["median_threshold"])
+    return out
+
+
 def normalized(score: float, base: float | None, ceil: float | None) -> float | None:
     if base is None or ceil is None or base == ceil:
         return None
@@ -64,7 +103,7 @@ def main() -> None:
     ap.add_argument("--ceiling", type=float)
     a = ap.parse_args()
     out = {"valid": False, "score": None, "higher_is_better": None, "rows": None, "error": None,
-           "position_score": None, "normalized_score": None, "reward": 0.0}
+           "position_score": None, "normalized_score": None, "reward": 0.0, "medal": None}
     try:
         g = load_grader(Path(a.grader_dir))
         hib = bool(g.HIGHER_IS_BETTER)
@@ -90,6 +129,10 @@ def main() -> None:
         out.update(valid=True, score=score)
         if a.leaderboard and Path(a.leaderboard).exists():
             out["position_score"] = position(score, a.leaderboard, hib)
+            try:
+                out.update(medal_info(score, a.leaderboard, hib))
+            except Exception as e:  # a broken leaderboard must not invalidate the submission
+                out["medal_error"] = f"{type(e).__name__}: {e}"[:200]
         out["normalized_score"] = normalized(score, a.baseline, a.ceiling)
         for k in ("position_score", "normalized_score"):
             if out[k] is not None:

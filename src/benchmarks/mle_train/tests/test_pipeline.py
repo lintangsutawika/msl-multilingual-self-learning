@@ -114,10 +114,10 @@ def test_split_disjoint_complete_deterministic(built):
     priv = built["root"] / "toy-regression/prepared/private"
     pub, prv = pd.read_csv(priv / "public_answers.csv"), pd.read_csv(priv / "private_answers.csv")
     assert set(pub.id).isdisjoint(prv.id)
-    assert len(pub) + len(prv) == N_TEST and len(pub) == round(0.3 * N_TEST)
+    assert len(pub) + len(prv) == N_TEST and len(pub) == round(split.PUBLIC_FRAC * N_TEST)
     ids = [str(i) for i in range(5000, 5000 + N_TEST)]
-    assert split.public_ids(ids, 0.3, 0) == split.public_ids(list(reversed(ids)), 0.3, 0)  # order-independent
-    assert split.public_ids(ids, 0.3, 0) == set(pub.id.astype(str))
+    assert split.public_ids(ids, 0.5, 0) == split.public_ids(list(reversed(ids)), 0.5, 0)  # order-independent
+    assert split.public_ids(ids, split.PUBLIC_FRAC, 0) == set(pub.id.astype(str))
 
 
 def test_sanity_and_config(built):
@@ -236,6 +236,9 @@ def test_export_format_and_guard(built, tmp_path):
     rows = [json.loads(l) for l in (built["t"] / "train.jsonl").read_text().splitlines()]
     assert len(rows) == 1 and rows[0]["metadata"] == {"instance_id": "toy-regression", "source": "mledojo-dsbench"}
     assert rows[0]["prompt"].startswith("# Task")
+    directions = json.loads((built["t"] / "metric_directions.json").read_text())
+    assert directions == {"toy-regression": "lower"}  # the toy metric is an error (lower is better)
+    assert (built["t"] / "train.dispatch.txt").read_text().strip() == "toy-regression"
     bad = tmp_path / "bad"
     shutil.copytree(built["tasks"] / "toy-regression", bad / "spooky-author-identification")
     r = subprocess.run([sys.executable, str(PIPELINE), "export", "--tasks-dir", str(bad), "--out",
@@ -258,3 +261,45 @@ def test_leak_check(tmp_path):
     noisy = tmp_path / "noisy.csv"
     ans.assign(y=np.random.RandomState(0).randint(0, 2, 1000)).to_csv(noisy, index=False)
     assert split._leak(ans, noisy, "id") is None
+
+
+def _run_verifier(task: Path, sub: Path | None, tmp: Path) -> Path:
+    """Run the built tests/test.sh with its absolute paths (/tests, /workspace, /logs) moved under tmp."""
+    for d in ("tests", "workspace", "logs/verifier"):
+        (tmp / d).mkdir(parents=True, exist_ok=True)
+    shutil.copytree(task / "tests", tmp / "tests", dirs_exist_ok=True)
+    if sub is not None:
+        shutil.copy(sub, tmp / "workspace/predictions.csv")
+    script = (task / "tests/test.sh").read_text()
+    for p in ("/tests/", "/workspace/", "/logs/"):
+        script = script.replace(p, f"{tmp}{p}")
+    script = script.replace("python3 ", f"{sys.executable} ")
+    (tmp / "test.sh").write_text(script)
+    r = subprocess.run(["bash", str(tmp / "test.sh")], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    return tmp / "logs/verifier"
+
+
+@pytest.mark.parametrize("offset,medal", [(0.1, "gold"), (0.5, "bronze"), (1.0, "none"), (None, "none")])
+def test_verifier_writes_grade_json_for_trainer(built, tmp_path, offset, medal):
+    """test.sh writes grade.json in the MLE-bench template's format, with MLE-bench's medal rules, and the trainer's
+    final-episode reward reads it (gold 1.0 ... valid without medal 0.1, no valid submission 0)."""
+    task = built["tasks"] / "toy-regression"
+    sub = None
+    if offset is not None:
+        ans = pd.read_csv(built["root"] / "toy-regression/prepared/private/answers.csv")
+        sub = tmp_path / "sub.csv"
+        ans.assign(target=ans.target + offset).to_csv(sub, index=False)  # RMSE = offset
+    # Toy leaderboard: 100 teams, RMSE 0.05..2.0 -> gold <= #10, silver <= #20, bronze <= #40 (Kaggle rules).
+    out = _run_verifier(task, sub, tmp_path / "box")
+    g = json.loads((out / "grade.json").read_text())
+    assert g["medal"] == medal and g["valid_submission"] is (offset is not None) and g["is_lower_better"] in (True, None)
+    assert {"score", "gold_threshold", "silver_threshold", "bronze_threshold", "median_threshold"} <= set(g)
+    trial = tmp_path / "trials/toy-regression__1/toy-regression__abc"
+    shutil.copytree(out, trial / "verifier")
+    env = {**__import__("os").environ, "SPOOL_TRIALS_DIR": str(tmp_path / "trials"), "SPOOL_DIR": str(tmp_path / "spool")}
+    code = "from src.trainer.spool_rollout import _final_reward; print(_final_reward('toy-regression__1'))"
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env, cwd=PKG.parents[2])
+    assert r.returncode == 0, r.stderr
+    want = {"gold": 1.0, "silver": 0.67, "bronze": 0.33}.get(medal, 0.1 if offset is not None else 0.0)
+    assert float(r.stdout.strip().splitlines()[-1]) == want

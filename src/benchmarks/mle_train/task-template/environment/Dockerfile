@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends curl tmux sudo && rm -rf /var/lib/apt/lists/*
+# libgomp1: OpenMP runtime LightGBM (and other compiled ML libraries) load at import; the agent cannot apt-get it.
+RUN apt-get update && apt-get install -y --no-install-recommends curl tmux sudo libgomp1 && rm -rf /var/lib/apt/lists/*
 # Grading dependencies, pinned to the versions the pipeline's sanity check ran with (see requirements.txt):
 # validate in the box must score exactly like the check that marked the task usable. Installed system-wide as
 # root; the grader runs with `python3 -I`, so the agent's `pip install --user` packages never reach it.

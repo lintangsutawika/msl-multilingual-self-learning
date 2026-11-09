@@ -138,7 +138,7 @@ def main() -> None:
     p.add_argument("--cpus", type=int, default=4)
     p.add_argument("--memory-mb", type=int, default=16384)
 
-    p = sub.add_parser("export", help="Harbor tasks -> Miles prompt jsonl (+ per-source task lists)")
+    p = sub.add_parser("export", help="Harbor tasks -> trainer prompt jsonl, metric_directions.json, dispatch + per-source task lists")
     p.add_argument("--tasks-dir", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--agent-name", help="optional metadata.agent_name for the rollout function")

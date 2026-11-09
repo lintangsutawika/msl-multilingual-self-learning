@@ -107,24 +107,37 @@ def build(root: Path, out: Path, only: list[str] | None, source: str | None, lim
     for name in sel.task:
         made.append(build_one(root / name, out, agent_timeout, cpus, memory_mb))
         print("built", made[-1])
+    if not (only or source or limit):  # a full build: anything else in `out` is a task that is no longer usable
+        stale = sorted({p.parent.name for p in out.glob("*/task.toml")} - set(sel.task))
+        if stale:
+            print(f"WARNING: {len(stale)} task(s) in {out} are no longer usable (see index.tsv) but were left in "
+                  f"place; delete them before export/upload: {' '.join(stale)}")
     return made
 
 
 def export(tasks_dir: Path, out: Path, agent_name: str | None) -> None:
-    """Write the training prompt file Miles reads (--prompt-data, see src/run_training.py): one line per Harbor task,
-    {"prompt": <instruction.md>, "metadata": {"instance_id": <task dir name>, "source": ...}}, with HARBOR_TASKS_DIR
-    pointing at tasks_dir. Also writes <out stem>.<source>.txt task lists (for oracle checks or subsets)."""
+    """Write what the msl training pipeline reads, next to `out`:
+    - out (e.g. train.jsonl): the trainer's PROMPT_DATA (src/trainer/run_train.py), one line per Harbor task,
+      {"prompt": <instruction.md>, "metadata": {"instance_id": <task dir name>, "source": ...}};
+    - metric_directions.json: {task: "higher"|"lower"}, the trainer's METRIC_DIRECTIONS (src/trainer/spool_rollout.py
+      drops trials of tasks not listed there);
+    - <out stem>.dispatch.txt: one comma-separated line of all tasks, for the rollout job's DISPATCH_TASKS;
+    - <out stem>.<source>.txt task lists (for oracle checks or subsets).
+    The rollout job also needs --tasks-dir and SCORE_KEYS_DIR = tasks_dir (each task's environment/score_key)."""
     import json
     import tomllib
     from collections import defaultdict
 
-    by_source, n = defaultdict(list), 0
+    by_source, directions, n = defaultdict(list), {}, 0
     out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as f:
         for t in sorted(p.parent for p in tasks_dir.glob("*/task.toml")):
             if is_mlebench(t.name):
                 raise ValueError(f"{t.name} in {tasks_dir} is an MLE-bench competition; remove it before training")
             meta = tomllib.loads((t / "task.toml").read_text()).get("metadata", {})
+            if not isinstance(meta.get("higher_is_better"), bool):
+                raise ValueError(f"{t.name}: task.toml [metadata] higher_is_better must be true or false")
+            directions[t.name] = "higher" if meta["higher_is_better"] else "lower"
             md = {"instance_id": t.name, "source": meta.get("source")}
             if agent_name:
                 md["agent_name"] = agent_name
@@ -133,4 +146,6 @@ def export(tasks_dir: Path, out: Path, agent_name: str | None) -> None:
             n += 1
     for src, names in by_source.items():
         (out.parent / f"{out.stem}.{src}.txt").write_text("\n".join(names) + "\n")
+    (out.parent / "metric_directions.json").write_text(json.dumps(directions, indent=1, sort_keys=True) + "\n")
+    (out.parent / f"{out.stem}.dispatch.txt").write_text(",".join(sorted(directions)) + "\n")
     print(f"wrote {out} ({n} tasks): " + ", ".join(f"{s}={len(v)}" for s, v in sorted(by_source.items())))
