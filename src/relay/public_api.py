@@ -49,7 +49,12 @@ SECRET_NAME = os.environ.get("RELAY_SECRET_NAME", "mho-relay")
 # no `modal secret create` step is needed. Otherwise fall back to a named Modal
 # secret (the stable shared relay uses `tts-relay`).
 if os.environ.get("RELAY_SECRET"):
-    _relay_secret = modal.Secret.from_dict({"RELAY_SECRET": os.environ["RELAY_SECRET"]})
+    _relay_secret = modal.Secret.from_dict({
+        "RELAY_SECRET": os.environ["RELAY_SECRET"],
+        # Optional per-request wait (s) baked into the app; unset keeps the 600 s default.
+        **({"RELAY_REQUEST_TIMEOUT": os.environ["RELAY_REQUEST_TIMEOUT"]}
+           if os.environ.get("RELAY_REQUEST_TIMEOUT") else {}),
+    })
 else:
     _relay_secret = modal.Secret.from_name(SECRET_NAME)
 
@@ -82,7 +87,11 @@ image = modal.Image.debian_slim().pip_install("fastapi==0.115.*", "websockets>=1
     # large SWE-bench payloads and missed the bridge's WebSocket keepalive, so the
     # bridge tore the socket down (1011) and every in-flight request was lost.
     # Give the loop real cores so it can pong on time and forward without stalling.
-    cpu=4.0,
+    # The singleton container must be rescheduled whenever Modal recycles it, and a
+    # large request can wait a long time for capacity ("waiting to be scheduled on a
+    # CPU worker"), so ask for only what the load needs: RELAY_CPU at deploy time
+    # (default 1; 8 concurrent MLE-Bench trials need far less than SWE-bench fan-in).
+    cpu=float(os.environ.get("RELAY_CPU", "1.0")),
     secrets=[_relay_secret],
 )
 @modal.concurrent(max_inputs=64)  # many concurrent agents multiplexed over one WS
@@ -170,7 +179,7 @@ def web():
         async with send_lock:
             await ws.send_text(payload)
         try:
-            resp = await asyncio.wait_for(fut, timeout=600)
+            resp = await asyncio.wait_for(fut, timeout=float(os.environ.get("RELAY_REQUEST_TIMEOUT", "600")))
         except asyncio.TimeoutError:
             pending.pop(rid, None)
             raise HTTPException(status_code=504, detail="relay timeout waiting for node")

@@ -33,7 +33,7 @@ def main() -> int:
     ap.add_argument("--api-key-file", required=True)
     ap.add_argument("--relay", required=True)
     ap.add_argument("--relay-secret", required=True)
-    ap.add_argument("--spool", required=True)
+    ap.add_argument("--spool", default="", help="spool dir; empty = capture is off, skip spool checks")
     ap.add_argument("--trial", required=True)
     a = ap.parse_args()
     key = open(a.api_key_file).read().strip()
@@ -71,7 +71,7 @@ def main() -> int:
     out["checks"]["direct_tool_call_parsed"] = bool(tcalls)
 
     # 2. Through the relay with a session path; history contains a validate round.
-    spool_file = os.path.join(a.spool, f"{a.trial}.jsonl")
+    spool_file = os.path.join(a.spool or ".", f"{a.trial}.jsonl")
     before = sum(1 for _ in open(spool_file)) if os.path.exists(spool_file) else 0
     history = [
         {"role": "system", "content": "You are an ML engineer."},
@@ -93,6 +93,10 @@ def main() -> int:
     out["checks"]["relay_strips_logprobs"] = "logprobs" not in rch or rch["logprobs"] is None
 
     time.sleep(2)
+    if not a.spool:  # serving-only endpoint (CAPTURE=0): nothing is recorded
+        out["ok"] = all(out["checks"].values())
+        print(json.dumps(out, indent=2))
+        return 0 if out["ok"] else 1
     lines = open(spool_file).read().splitlines() if os.path.exists(spool_file) else []
     out["spool_file"] = spool_file
     out["checks"]["spool_appended"] = len(lines) > before

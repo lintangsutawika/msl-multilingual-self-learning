@@ -16,7 +16,10 @@
 #   MILES_SIF    miles.sif (MILES sglang fork; default: the shared one)
 #   MODEL_PATH   HF checkpoint to serve (default: base Qwen3.5-9B snapshot)
 #   MSL_STORE    group-storage root (default /groups/gai51740/aci18914wh/msl/runs)
-#   RUN_NAME     run dir under MSL_STORE for keys, endpoint, spool, version (default rollout)
+#   RUN_NAME     run dir under MSL_STORE for keys, endpoint, spool, version (default rollout);
+#                must differ per concurrent job (the script refuses a run dir a live job uses)
+#   CAPTURE      1 = record every call to the spool (default); 0 = serving-only endpoint
+#   RELAY_APP    Modal app name (default msl-rollout-relay-<job>; a fixed name keeps the URL)
 #   PORT         local SGLang port (default 30010)
 #   TP_SIZE / DP_SIZE / CONTEXT_LENGTH   SGLang parallelism / context (default 1 / 1 / 262144)
 #   SGLANG_EXTRA_ARGS  extra SGLang flags (default: --tool-call-parser qwen3_coder)
@@ -24,6 +27,9 @@
 #   DISPATCH_TASKS     comma-separated mlebench-low tasks to run as real trials (default: none)
 #   DISPATCH_MAX_CONCURRENT / MAX_ITERATIONS   dispatcher limits (default 2 / 200)
 #   DISPATCH_ROUNDS    passes over DISPATCH_TASKS (default 1; 0 = forever)
+#   CONDENSER_MAX_EVENTS  agent summarizes older history past this many events (default 120; 0 = off)
+#   MAX_GEN_TOKENS     cap on tokens per model call, set by the forwarder (default 16384; 0 = no cap)
+#   TERMINAL_MAX_TIMEOUT  cap on how long one agent terminal action may block, seconds (default 1800; 0 = no cap)
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 cd "$REPO_ROOT"
@@ -35,14 +41,28 @@ RUN_NAME="${RUN_NAME:-rollout}"
 MSL_STORE="${MSL_STORE:-/groups/gai51740/aci18914wh/msl/runs}"
 RUN_DIR="${MSL_STORE}/${RUN_NAME}"
 SPOOL_DIR="${SPOOL_DIR:-${RUN_DIR}/spool}"
+# CAPTURE=0: serving-only endpoint (e.g. for evaluation): nothing is recorded to the spool.
+CAPTURE="${CAPTURE:-1}"
+if [ "$CAPTURE" = 1 ]; then FWD_CAPTURE_DIR="$SPOOL_DIR"; else FWD_CAPTURE_DIR=""; fi
 LOG_DIR="${REPO_ROOT}/logs/rollout-${JOBTAG}"
 PORT="${PORT:-30010}"
 MILES_SIF="${MILES_SIF:-/home/aci18914wh/mho-model-harness-optimization/miles.sif}"
 MODEL_PATH="${MODEL_PATH:-/home/aci18914wh/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a}"
 RELAY_APP="${RELAY_APP:-msl-rollout-relay-${JOBTAG}}"
+MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-16384}"
 mkdir -p "$RUN_DIR" "$SPOOL_DIR" "$LOG_DIR"
 log() { echo "[rollout $(date +%H:%M:%S)] $*"; }
 log "job=${JOBTAG} run_dir=${RUN_DIR} model=${MODEL_PATH} port=${PORT}"
+
+# Refuse to take over a run dir another live job is serving from (keys, endpoint.env and
+# weight_version would be overwritten, and its cleanup would delete our endpoint.env).
+if [ -f "${RUN_DIR}/endpoint.env" ]; then
+  OTHER="$(sed -n 's/^ROLLOUT_JOB=//p' "${RUN_DIR}/endpoint.env")"
+  if [ -n "$OTHER" ] && [ "$OTHER" != "$JOBTAG" ] && qstat "${OTHER}.pbs1" >/dev/null 2>&1; then
+    log "RUN_DIR ${RUN_DIR} is in use by running job ${OTHER}; set a different RUN_NAME"
+    exit 1
+  fi
+fi
 
 # Served weight version: SGLang always starts from MODEL_PATH (= version 0); the weight
 # watcher bumps it after each swap. Reset on every start so a restart never reports a stale version.
@@ -52,7 +72,9 @@ PIDS=()
 cleanup() {
   log "shutting down (stopping relay app ${RELAY_APP})"
   for p in "${PIDS[@]}"; do kill "$p" 2>/dev/null || true; done
-  uv run modal app stop "${RELAY_APP}" >/dev/null 2>&1 || true
+  # -y: without a terminal `modal app stop` asks for confirmation and aborts, which
+  # left the app (and its pinned container) running.
+  uv run modal app stop -y "${RELAY_APP}" >/dev/null 2>&1 || log "could not stop relay app ${RELAY_APP}; stop it by hand"
   rm -f "${RUN_DIR}/endpoint.env"
 }
 trap cleanup EXIT TERM INT
@@ -96,7 +118,7 @@ log "relay deployed: ${RELAY_URL}"
 # 3. Forwarder: relay bridge + per-call capture into the shared spool.
 RELAY_WS_URL="wss://${RELAY_URL#https://}/bridge" RELAY_SECRET="$RELAY_SECRET" \
   VLLM_LOCAL_URL="http://127.0.0.1:${PORT}" BACKEND_API_KEY="$API_KEY" \
-  CAPTURE_DIR="$SPOOL_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" \
+  CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" \
   uv run --with websockets --with httpx python src/relay/node_forwarder.py > "${LOG_DIR}/forwarder.log" 2>&1 &
 FWD_PID=$!; PIDS+=("$FWD_PID")
 
@@ -115,7 +137,7 @@ log "endpoint -> ${RUN_DIR}/endpoint.env"
 sleep 15
 uv run --with httpx python src/rollout/probe.py \
   --local "http://127.0.0.1:${PORT}" --api-key-file "${RUN_DIR}/sglang_api_key" \
-  --relay "$RELAY_URL" --relay-secret "$RELAY_SECRET" --spool "$SPOOL_DIR" --trial "probe-${JOBTAG}" \
+  --relay "$RELAY_URL" --relay-secret "$RELAY_SECRET" --spool "$FWD_CAPTURE_DIR" --trial "probe-${JOBTAG}" \
   > "${LOG_DIR}/probe.json" 2> "${LOG_DIR}/probe.err" \
   && log "probe ok -> ${LOG_DIR}/probe.json" || log "PROBE FAILED -> ${LOG_DIR}/probe.err"
 
@@ -136,7 +158,7 @@ if [ -n "${LATEST_FILE:-}" ]; then start_watcher; log "weight watcher on ${LATES
 if [ -n "${DISPATCH_TASKS:-}" ]; then
   .venv/bin/python src/rollout/dispatch.py --run-dir "$RUN_DIR" --tasks "$DISPATCH_TASKS" \
     --max-concurrent "${DISPATCH_MAX_CONCURRENT:-2}" --max-iterations "${MAX_ITERATIONS:-200}" \
-    --rounds "${DISPATCH_ROUNDS:-1}" \
+    --rounds "${DISPATCH_ROUNDS:-1}" --condenser-max-events "${CONDENSER_MAX_EVENTS:-120}" --terminal-max-timeout "${TERMINAL_MAX_TIMEOUT:-1800}" \
     > "${LOG_DIR}/dispatch.log" 2>&1 &
   PIDS+=("$!")
   log "dispatcher started for ${DISPATCH_TASKS}"
@@ -150,7 +172,7 @@ while true; do
     log "forwarder exited; restarting"
     RELAY_WS_URL="wss://${RELAY_URL#https://}/bridge" RELAY_SECRET="$RELAY_SECRET" \
       VLLM_LOCAL_URL="http://127.0.0.1:${PORT}" BACKEND_API_KEY="$API_KEY" \
-      CAPTURE_DIR="$SPOOL_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" \
+      CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" \
       uv run --with websockets --with httpx python src/relay/node_forwarder.py >> "${LOG_DIR}/forwarder.log" 2>&1 &
     FWD_PID=$!; PIDS+=("$FWD_PID")
   fi

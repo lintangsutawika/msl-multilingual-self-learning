@@ -1,6 +1,7 @@
 """Rollout dispatcher: run real MLE-Bench trials against this rollout job's relay.
 
-Each trial is one `harbor run` of the stock openhands-sdk agent in a SAIL sandbox,
+Each trial is one `harbor run` of the openhands-sdk agent (with a history condenser,
+src/rollout/openhands_agent.py) in a SAIL sandbox,
 with the agent's LLM pointed at the relay *session* URL for that trial:
 
     LLM_BASE_URL = <relay>/sessions/<trial>/v1
@@ -8,13 +9,17 @@ with the agent's LLM pointed at the relay *session* URL for that trial:
 so the rollout job's forwarder files every call of the trial under spool/<trial>.jsonl.
 The relay URL/secret come from the rollout job's endpoint.env (fresh per rollout job).
 
-Runs the task list round-robin (--rounds passes, 0 = forever) with bounded concurrency. Later: take tasks from the
+Runs the task list round-robin (--rounds passes, 0 = forever) with bounded concurrency.
+New trials are held while the relay is down (its /health fails or reports no bridge),
+and resume when it is back. Later: take tasks from the
 task_queue/ the trainer writes, and honor dispatch_ctl.json (pause / max in flight).
 
     python src/rollout/dispatch.py --run-dir <MSL_STORE>/rollout --tasks aerial-cactus-identification
 """
 import argparse
+import json
 import os
+import urllib.request
 import subprocess
 import sys
 import time
@@ -41,6 +46,17 @@ def log(msg: str) -> None:
     print(f"[dispatch {datetime.now():%H:%M:%S}] {msg}", flush=True)
 
 
+def relay_ok(ep: dict) -> bool:
+    """True if the relay answers /health with the node's bridge connected. When Modal
+    recycles the relay container and cannot reschedule it, every LLM call times out and
+    a trial started then just burns a sandbox and fails."""
+    try:
+        with urllib.request.urlopen(f"{ep['RELAY_URL'].rstrip('/')}/health", timeout=20) as r:
+            return bool(json.loads(r.read()).get("bridge_connected"))
+    except Exception:
+        return False
+
+
 def launch(task: str, trial: str, ep: dict, a, logs: Path) -> subprocess.Popen:
     base = f"{ep['RELAY_URL'].rstrip('/')}/sessions/{trial}/v1"
     env = dict(os.environ)
@@ -49,16 +65,19 @@ def launch(task: str, trial: str, ep: dict, a, logs: Path) -> subprocess.Popen:
     for k, v in read_env(REPO / ".env").items():
         env.setdefault(k, v)
     env["SAIL_API_KEY"] = env.get("SAIL_API_KEY") or env.get("SAIL_KEY", "")
+    env["PYTHONPATH"] = f"{REPO}:{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(REPO)  # -a src.rollout...
     cmd = [
         str(REPO / ".venv" / "bin" / "harbor"), "run",
         "-p", str(REPO / a.tasks_dir / task),
-        "-a", "openhands-sdk", "-m", f"litellm_proxy/{a.model}",
+        "-a", a.agent, "-m", f"litellm_proxy/{a.model}",
         "-e", "sail.harbor:SailboxEnvironment",
         "-n", "1",
         "--ae", f"LLM_API_KEY={ep['RELAY_SECRET']}",
         "--ae", f"LLM_BASE_URL={base}",
         "--ae", f"LLM_MODEL=litellm_proxy/{a.model}",
         "--ae", f"MAX_ITERATIONS={a.max_iterations}",
+        *(["--ae", f"CONDENSER_MAX_EVENTS={a.condenser_max_events}"] if a.condenser_max_events else []),
+        *(["--ae", f"TERMINAL_MAX_TIMEOUT={a.terminal_max_timeout}"] if a.terminal_max_timeout else []),
         "--job-name", trial,
         "-o", str(a.jobs_dir), "-y",
     ]
@@ -74,6 +93,12 @@ def main() -> int:
     ap.add_argument("--tasks", required=True, help="comma-separated task dirs under --tasks-dir")
     ap.add_argument("--tasks-dir", default="harbor_tasks/mlebench-low")
     ap.add_argument("--model", default="qwen3.5-9B")
+    ap.add_argument("--agent", default="src.rollout.openhands_agent:CondensingOpenHandsSDK",
+                    help="harbor agent name or import path (stock: openhands-sdk)")
+    ap.add_argument("--condenser-max-events", type=int, default=120,
+                    help="summarize history past this many events (0 = never; needs the condensing agent)")
+    ap.add_argument("--terminal-max-timeout", type=int, default=1800,
+                    help="cap on how long one terminal action may block, seconds (0 = no cap; needs the condensing agent)")
     ap.add_argument("--max-concurrent", type=int, default=2)
     ap.add_argument("--max-iterations", type=int, default=200)
     ap.add_argument("--trial-timeout", type=int, default=14400)
@@ -117,8 +142,14 @@ def main() -> int:
     pending = trials()
     running: dict[str, subprocess.Popen] = {}
     exhausted = False
+    paused = False
     while not exhausted or running:
-        while not exhausted and len(running) < a.max_concurrent:
+        if not exhausted and len(running) < a.max_concurrent:
+            up = relay_ok(ep)
+            if up == paused:
+                paused = not up
+                log("relay down (no /health or no bridge); pausing new trials" if paused else "relay back; resuming")
+        while not paused and not exhausted and len(running) < a.max_concurrent:
             nxt = next(pending, None)
             if nxt is None:
                 exhausted = True

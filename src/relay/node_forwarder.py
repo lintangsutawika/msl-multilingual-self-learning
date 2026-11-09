@@ -13,6 +13,8 @@ Env:
     CAPTURE_DIR     (optional) spool dir; when set, every chat completion is recorded
                     there for the trainer (see "Rollout capture" below)
     WEIGHT_VERSION_FILE  (optional) file holding the served weight version (int)
+    MAX_GEN_TOKENS  (optional) cap on the tokens one chat completion may generate
+                    (0/unset = no cap; agents send no limit of their own)
 
 Run (deps resolved by uv):
     uv run --with websockets --with httpx python harbor/relay/bridge.py
@@ -42,6 +44,7 @@ BACKEND_API_KEY = os.environ.get("BACKEND_API_KEY", "")  # injected into forward
 EPISODE_RECEIVER_URL = os.environ.get("EPISODE_RECEIVER_URL", "").rstrip("/")
 CAPTURE_DIR = os.environ.get("CAPTURE_DIR", "")
 WEIGHT_VERSION_FILE = os.environ.get("WEIGHT_VERSION_FILE", "")
+MAX_GEN_TOKENS = int(os.environ.get("MAX_GEN_TOKENS", "0") or 0)
 # Per-competition keys that sign `validate` scores (<dir>/<competition>/environment/score_key).
 SCORE_KEYS_DIR = Path(os.environ.get("SCORE_KEYS_DIR", str(Path(__file__).resolve().parents[2] / "harbor_tasks" / "mlebench-low")))
 
@@ -129,6 +132,21 @@ def _prepare_chat(body: dict) -> dict:
     return asked
 
 
+def _cap_tokens(body: dict) -> bool:
+    """Clamp the generation length to MAX_GEN_TOKENS; True if the cap was added to a request
+    that set no limit. The agents set none, so a policy stuck in a repetition loop generated
+    until the context filled (97k-token "WAIT WAIT ..." responses, 2026-11-04); a capped call
+    ends with finish_reason "length"."""
+    if MAX_GEN_TOKENS <= 0:
+        return False
+    limits = [k for k in ("max_tokens", "max_completion_tokens") if body.get(k) is not None]
+    for k in limits:
+        body[k] = min(int(body[k]), MAX_GEN_TOKENS)
+    if not limits:
+        body["max_tokens"] = MAX_GEN_TOKENS
+    return not limits
+
+
 def _strip_for_client(resp: dict, asked: dict) -> None:
     """Keep relay payloads small and client-visible responses unchanged."""
     for ch in resp.get("choices") or []:
@@ -210,21 +228,26 @@ async def handle(ws, send_lock: asyncio.Lock, frame: dict, client: httpx.AsyncCl
         _auth = ({"authorization": f"Bearer {BACKEND_API_KEY}"} if (BACKEND_API_KEY and not _is_episode) else {})
         content = frame["body"].encode()
         capture = None
-        if CAPTURE_DIR and frame["method"] == "POST" and path.endswith("/chat/completions"):
+        cap_added = False
+        if (CAPTURE_DIR or MAX_GEN_TOKENS) and frame["method"] == "POST" and path.endswith("/chat/completions"):
             try:
                 req = json.loads(frame["body"])
-                asked = _prepare_chat(req)
-                if not asked["stream"]:
-                    content = json.dumps(req).encode()
-                    capture = (req, asked, _weight_version(), time.monotonic())
+                cap_added = _cap_tokens(req)
+                if CAPTURE_DIR:
+                    asked = _prepare_chat(req)
+                    if not asked["stream"]:
+                        capture = (req, asked, _weight_version(), time.monotonic())
+                content = json.dumps(req).encode()
             except Exception as e:
                 log(f"capture prepare failed ({e}); forwarding unchanged")
-        r = await client.request(
-            frame["method"],
-            url,
-            content=content,
-            headers={"content-type": "application/json", **_auth},
-        )
+        headers = {"content-type": "application/json", **_auth}
+        r = await client.request(frame["method"], url, content=content, headers=headers)
+        if cap_added and r.status_code == 400 and "context length" in r.text:
+            # SGLang rejects prompt + max_tokens beyond the context; this close to the limit
+            # the remaining room is already below the cap, so send the call without it.
+            req.pop("max_tokens", None)
+            content = json.dumps(req).encode()
+            r = await client.request(frame["method"], url, content=content, headers=headers)
         body_text = r.text
         if capture is not None and r.status_code == 200:
             req, asked, v_start, t0 = capture
@@ -270,7 +293,7 @@ async def main() -> None:
     if CAPTURE_DIR:
         os.makedirs(CAPTURE_DIR, exist_ok=True)
         log(f"capturing chat completions -> {CAPTURE_DIR} (version file: {WEIGHT_VERSION_FILE or 'none'})")
-    async with httpx.AsyncClient(timeout=600.0) as client:
+    async with httpx.AsyncClient(timeout=float(os.environ.get("RELAY_REQUEST_TIMEOUT", "600"))) as client:
         while True:
             try:
                 async with websockets.connect(
