@@ -83,7 +83,7 @@ def main() -> None:
     p.add_argument("--skip-download", action="store_true", help="reuse WORKDIR/raw as is")
     p.add_argument("--max-gb", type=float, default=5.0, help="skip Kaggle competitions whose zip is larger")
     p.add_argument("--workers", type=int, default=cpus)
-    p.add_argument("--min-public-ids", type=int, default=100)
+    p.add_argument("--min-public-ids", type=int, default=20)
     p.add_argument("--max-public-mb", type=float, default=2000.0)
     p.add_argument("--agent-timeout", type=int, default=7200)
     p.add_argument("--cpus", type=int, default=4)
@@ -125,7 +125,7 @@ def main() -> None:
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--tasks", nargs="*")
     p.add_argument("--workers", type=int, default=cpus)
-    p.add_argument("--min-public-ids", type=int, default=100)
+    p.add_argument("--min-public-ids", type=int, default=20)
 
     p = sub.add_parser("harbor", help="usable tasks -> Harbor task dirs")
     p.add_argument("--root", type=Path, required=True)

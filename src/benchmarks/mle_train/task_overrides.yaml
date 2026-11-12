@@ -12,26 +12,59 @@ drop_test_columns:
   quora-question-pairs: [is_duplicate]
   bnp-paribas-cardif-claims-management: [target]
 
-# Tasks whose Kaggle leaderboard measures a different problem, so the leaderboard reward (position, medal) is
-# meaningless: a trivial baseline beats Kaggle's winner.
+# Tasks left out entirely (task: reason). These 7 have no comparable Kaggle leaderboard, so their final grade could
+# carry no medal; dropped on 2026-11-11 to keep every training task's final reward medal-based.
 exclude:
   allstate-purchase-prediction-challenge: >-
     test histories are easier than Kaggle's (the last-quoted-plan baseline scores 69% vs Kaggle's best 53.7%), and
     the metric is a percentage while the leaderboard is a fraction
-  # Forecasting competitions (Kaggle's test is the future) that MLE-Dojo/DSBench split at random over dates: every
-  # test day lies inside the training period, so interpolating beats forecasting. For covid the nearest-day baseline
-  # wins gold (error 0.14-0.21 vs Kaggle's best 0.43-0.72).
-  covid19-global-forecasting-week-2: &forecast >-
-    forecasting competition split at random over dates: test days lie inside the training period, so the Kaggle
-    leaderboard (true forecasting) is not comparable
-  covid19-global-forecasting-week-3: *forecast
-  covid19-global-forecasting-week-4: *forecast
-  bike-sharing-demand: *forecast
-  demand-forecasting-kernels-only: *forecast
-  playground-series-s3e19: *forecast
-  playground-series-s3e20: *forecast
-  rossmann-store-sales: *forecast
-  tabular-playground-series-jan-2022: *forecast
-  tabular-playground-series-mar-2022: *forecast
-  tabular-playground-series-sep-2022: *forecast
-  walmart-recruiting-store-sales-forecasting: *forecast
+  shopee-product-matching: >-
+    the sample submission (each posting matches only itself) already beats every Kaggle team: F1 over matching
+    groups depends on the size of the test set, which is far smaller than Kaggle's
+  yelp-recsys-2013: >-
+    the sample submission already beats 86% of Kaggle teams: Kaggle's test was built around cold-start users and
+    businesses, our random split is not
+  bigquery-geotab-intersection-congestion: >-
+    two of the baseline sweep's trials beat Kaggle's best by 13-17% with 2-3 validate calls: 98% of test
+    intersections are also in train under MLE-Dojo's random split
+  playground-series-s3e6: >-
+    two independent baseline trials beat Kaggle's best RMSE by 15%: our test half lacks the extreme-price outliers
+    that dominate Kaggle's RMSE
+  covid19-global-forecasting-week-1: >-
+    after the time re-split, repeating each series' last value still beats 90% of Kaggle teams, so our held-out
+    period is not comparable to Kaggle's test period
+  playground-series-s3e19: >-
+    after the time re-split, repeating each series' last value beats 78% of Kaggle teams, so our held-out year is
+    not comparable to Kaggle's test year
+
+# Tasks kept for training without a Kaggle leaderboard (normalized score, no medal). Empty: see exclude.
+no_leaderboard:
+  {}
+
+# Sample submissions MLE-Dojo filled with the true answers: their target columns are reset to Kaggle's placeholder.
+sample_constant:
+  ashrae-energy-prediction: {meter_reading: 0}
+  bioresponse: {Activity: 0.5}
+
+# Per-task ceiling for the sample submission's leaderboard position (default MAX_SAMPLE_POSITION in split.py), where
+# the leaderboard is genuinely weak rather than not comparable.
+max_sample_position:
+  loan-default-prediction: 0.7  # predicting all zeros beat 62% of Kaggle teams on Kaggle too (MAE, mostly zeros)
+
+# Forecasting competitions (Kaggle's test is the future) that MLE-Dojo/DSBench split at random over dates: every test
+# day lay inside the training period, so interpolation beat Kaggle's forecasters (covid: the nearest-day baseline won
+# gold). timesplit.py merges train + test back and holds out the LAST stretch of time instead. See timesplit.py.
+time_split:
+  covid19-global-forecasting-week-1: {time: Date, series: [Country/Region, Province/State]}
+  covid19-global-forecasting-week-2: {time: Date, series: [Country_Region, Province_State]}
+  covid19-global-forecasting-week-3: {time: Date, series: [Country_Region, Province_State]}
+  covid19-global-forecasting-week-4: {time: Date, series: [Country_Region, Province_State]}
+  bike-sharing-demand: {time: datetime, month_days: 4}  # Kaggle's test: days 20+ of each month; we have days 1-19
+  demand-forecasting-kernels-only: {time: date, series: [store, item]}
+  playground-series-s3e19: {time: date, series: [country, store, product]}
+  playground-series-s3e20: {time: [year, week_no], series: [latitude, longitude]}
+  rossmann-store-sales: {time: Date, series: [Store], id_from: row, drop_test: [Customers]}  # Kaggle's test had no Customers
+  tabular-playground-series-jan-2022: {time: date, series: [country, store, product]}
+  tabular-playground-series-mar-2022: {time: time, series: [x, y, direction]}
+  tabular-playground-series-sep-2022: {time: date, series: [country, store, product]}
+  walmart-recruiting-store-sales-forecasting: {time: Date, series: [Store, Dept], id_from: [Store, Dept, Date]}

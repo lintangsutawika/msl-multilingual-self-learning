@@ -22,17 +22,43 @@ The public answers are, but only root can read them.
 from __future__ import annotations
 
 import re
+import os
 import secrets
 import shutil
 from pathlib import Path
 
-from common import GRADER_SRC, TEMPLATE, is_mlebench, link_file, link_tree, read_config
+from common import GRADER_SRC, TEMPLATE, is_mlebench, link_file, link_tree, read_config, task_overrides
 
 
 def _fill(path: Path, kw: dict) -> None:
     """Replace {key} for known keys in one pass (unknown braces, e.g. in f-strings, are left alone)."""
     path.write_text(re.sub(r"\{(\w+)\}", lambda m: str(kw[m.group(1)]) if m.group(1) in kw else m.group(0),
                            path.read_text()))
+
+
+# Sandboxes refuse single files above 5 GiB (SAIL); Kaggle shipped such files gzipped (acquire-valued-shoppers'
+# transactions.csv.gz, avazu's train.gz), so they are shipped as <name>.gz. pandas reads them as they are.
+MAX_FILE_BYTES = int(4.9 * 2**30)
+
+
+def _gzip_big_files(task: Path, public: Path) -> None:
+    """Replace each public file above MAX_FILE_BYTES with a gzipped copy, cached in prepared/_gz/ (rebuilds reuse it)."""
+    import gzip
+
+    for f in sorted(p for p in public.rglob("*") if p.is_file() and p.stat().st_size > MAX_FILE_BYTES):
+        rel = f.relative_to(public)
+        cache = task / "prepared/_gz" / (str(rel) + ".gz")
+        src = task / "prepared/public" / rel
+        if not cache.exists() or cache.stat().st_mtime < src.stat().st_mtime:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            tmp = cache.with_suffix(".tmp")
+            with open(src, "rb") as i, gzip.open(tmp, "wb", compresslevel=6) as o:
+                shutil.copyfileobj(i, o, 64 << 20)
+            os.replace(tmp, cache)
+        if cache.stat().st_size > MAX_FILE_BYTES:
+            raise ValueError(f"{rel} is still {cache.stat().st_size / 2**30:.1f} GiB gzipped")
+        f.unlink()
+        link_file(cache, f.with_name(f.name + ".gz"))
 
 
 def build_one(task: Path, out: Path, agent_timeout: int, cpus: int, memory_mb: int) -> Path:
@@ -49,13 +75,14 @@ def build_one(task: Path, out: Path, agent_timeout: int, cpus: int, memory_mb: i
     key.chmod(0o600)
     env, tests = t / "environment", t / "tests"
     link_tree(task / "prepared/public", env / "public")
+    _gzip_big_files(task, env / "public")
     for g in (env / "grader", tests / "grader"):
         shutil.copytree(task / "grader", g, ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copy(GRADER_SRC / "grade_cli.py", g / "grade_cli.py")
     link_file(task / "prepared/private/public_answers.csv", env / "grader/public_answers.csv")
     link_file(task / "prepared/private/private_answers.csv", tests / "grader/private_answers.csv")
     s = cfg["sanity"]
-    if cfg.get("leaderboard"):
+    if cfg.get("leaderboard") and task.name not in task_overrides()["no_leaderboard"]:
         link_file(task / cfg["leaderboard"], tests / "grader/leaderboard.csv")
         reward_args = "--leaderboard /tests/grader/leaderboard.csv"
     else:  # normalized between the sample submission (0) and the true answers (1) on the private split
@@ -69,8 +96,9 @@ def build_one(task: Path, out: Path, agent_timeout: int, cpus: int, memory_mb: i
         "id_column": cfg["id_column"],
         "public_ids": cfg["split"]["public_ids"],
         "private_ids": cfg["split"]["private_ids"],
-        "public_sample": repr(float(s["public_sample"])),
-        "private_sample": repr(float(s["private_sample"])),
+        # nan when the constant sample submission has no score (e.g. rank correlation; novozymes)
+        "public_sample": repr(float("nan") if s["public_sample"] is None else float(s["public_sample"])),
+        "private_sample": repr(float("nan") if s["private_sample"] is None else float(s["private_sample"])),
         "reward": cfg["reward"],
         "agent_timeout": float(agent_timeout),
         "cpus": cpus,

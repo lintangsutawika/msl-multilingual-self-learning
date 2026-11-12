@@ -328,3 +328,43 @@ def test_drop_test_columns(tmp_path):
     assert t.read_text() == "RowId,City,x\n1,Boston,0.10\n2,Atlanta,1e-05\n"  # other values untouched as text
     split._drop_test_columns(tmp_path, ["Target_p20"])  # idempotent
     assert t.read_text().startswith("RowId,City,x\n")
+
+
+def test_time_resplit_holds_out_the_end(tmp_path):
+    """timesplit.apply: merge MLE-Dojo's random split back and hold out the last dates; idempotent; ids rebuilt."""
+    import timesplit
+
+    t = tmp_path / "walmart-like"
+    pub, priv = t / "prepared/public", t / "prepared/private"
+    pub.mkdir(parents=True)
+    priv.mkdir(parents=True)
+    dates = pd.date_range("2020-01-01", periods=50, freq="D").strftime("%Y-%m-%d")
+    full = pd.DataFrame([(s, d, float(i)) for i, d in enumerate(dates) for s in (1, 2)], columns=["Store", "Date", "y"])
+    full["Id"] = full.Store.astype(str) + "_" + full.Date
+    rnd = np.random.RandomState(0).rand(len(full)) < 0.2  # MLE-Dojo-style random split over dates
+    full[~rnd][["Store", "Date", "y"]].to_csv(pub / "train.csv", index=False)
+    full[rnd][["Store", "Date"]].to_csv(pub / "test.csv", index=False)  # no id column, like walmart
+    full[rnd][["Id"]].assign(y=0.0).to_csv(pub / "sample_submission.csv", index=False)
+    full[rnd][["Id", "y"]].to_csv(priv / "answers.csv", index=False)
+    spec = {"time": "Date", "series": ["Store"], "id_from": ["Store", "Date"], "holdout": 0.2}
+    for _ in range(2):  # a rerun starts from the kept originals
+        info = timesplit.apply(t, spec, "sample_submission.csv")
+    tr, te = pd.read_csv(pub / "train.csv"), pd.read_csv(pub / "test.csv")
+    ans, smp = pd.read_csv(priv / "answers.csv"), pd.read_csv(pub / "sample_submission.csv")
+    assert tr.Date.max() < te.Date.min()  # a real forecast: every test day is after every training day
+    assert sorted(te.Date.unique()) == list(dates[-10:]) and len(tr) + len(te) == len(full)
+    assert "y" not in te.columns and set(ans.Id) == set(smp.Id) == set(te.Id)
+    assert (smp.y == 0.0).all() and info["test_from"] == dates[-10]
+    timesplit.last_value_baseline(t, spec, "sample_submission.csv", tmp_path / "b.csv")
+    b = pd.read_csv(tmp_path / "b.csv")
+    assert set(b.Id) == set(ans.Id) and b.y.nunique() == 1 and b.y.iloc[0] == tr.y.max()  # both stores share y = day index
+
+
+def test_sample_constant_and_onehot_perfect(tmp_path):
+    s = tmp_path / "sample_submission.csv"
+    pd.DataFrame({"id": [1, 2], "target": [0.3, 0.9]}).to_csv(s, index=False)  # MLE-Dojo filled in the answers
+    split._set_sample_constant(s, {"target": 0.5})
+    assert (pd.read_csv(s).target == 0.5).all()
+    ans = pd.DataFrame({"Id": ["a", "b", "c"], "Class": [0, 1, 1]})
+    p = split._perfect_submission(ans, ["Id", "class_0", "class_1"], "Id")
+    assert list(p.columns) == ["Id", "class_0", "class_1"] and p.class_1.tolist() == [0.0, 1.0, 1.0]

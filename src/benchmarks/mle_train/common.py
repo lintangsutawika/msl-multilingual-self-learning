@@ -52,10 +52,12 @@ OVERRIDES_FILE = HERE / "task_overrides.yaml"
 
 
 def task_overrides() -> dict:
-    """task_overrides.yaml: {"drop_test_columns": {task: [cols]}, "exclude": {task: reason}}."""
+    """task_overrides.yaml: drop_test_columns {task: [cols]}, exclude {task: reason}, no_leaderboard {task: reason},
+    sample_constant {task: {col: value}}, max_sample_position {task: float}, time_split {task: spec}."""
     d = yaml.safe_load(OVERRIDES_FILE.read_text()) if OVERRIDES_FILE.exists() else None
     d = d or {}
-    return {"drop_test_columns": d.get("drop_test_columns") or {}, "exclude": d.get("exclude") or {}}
+    keys = ("drop_test_columns", "exclude", "no_leaderboard", "sample_constant", "max_sample_position", "time_split")
+    return {k: d.get(k) or {} for k in keys}
 
 
 def read_config(task: Path) -> dict:

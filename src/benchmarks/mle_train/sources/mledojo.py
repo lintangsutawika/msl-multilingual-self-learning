@@ -91,6 +91,11 @@ def _download_kaggle(dojo_repo: Path, data_dir: Path, max_gb: float, competition
     meta = json.load(open(dojo_repo / "prepare/mle.json"))
     comps = sorted((_zip_bytes(v), k) for k, v in meta.items() if not is_mlebench(k) and (
         (competitions and k in competitions) or (not competitions and _zip_bytes(v) <= max_gb * 1e9)))
+    # Explicitly named competitions MLE-Dojo has prepare code for but no mle.json entry (e.g. paddy-disease-
+    # classification): include them too; prepare_competition only needs mledojo/competitions/<id>/utils/prepare.py.
+    for k in competitions or []:
+        if k not in meta and not is_mlebench(k) and (dojo_repo / "mledojo/competitions" / k / "utils/prepare.py").exists():
+            comps.append((float("inf"), k))
     status = kdir / "_status.tsv"
     rows = {l.split("\t")[0]: l for l in status.read_text().splitlines()[1:]} if status.exists() else {}
     for sz, cid in comps:
@@ -183,7 +188,9 @@ def import_tasks(dojo_repo: Path, data_dir: Path, root: Path, only: list[str] | 
         g = t / "grader"
         (g / "mledojo/metrics").mkdir(parents=True)
         shutil.copy(GRADER_SRC / "mledojo_grade.py", g / "grade.py")
-        shutil.copy(metric, g / "metric.py")
+        # NumPy 2 removed np.trapz (renamed np.trapezoid); MLE-Dojo's metrics predate it. Works on both versions.
+        (g / "metric.py").write_text(metric.read_text().replace(
+            "np.trapz(", "(getattr(np, 'trapezoid', None) or getattr(np, 'trapz'))("))
         shutil.copy(dojo_repo / "mledojo/metrics/base.py", g / "mledojo/metrics/base.py")
         for f in ("mledojo/__init__.py", "mledojo/metrics/__init__.py"):
             (g / f).touch()

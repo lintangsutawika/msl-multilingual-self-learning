@@ -33,7 +33,7 @@ from common import GRADER_SRC, PUBLIC_FRAC, SEED, dir_mb, read_config, task_dirs
 INDEX_COLS = ["task", "source", "usable", "reason", "modality", "higher_is_better", "id_column", "test_ids",
               "public_ids", "private_ids", "public_mb", "public_files", "public_sample", "public_perfect",
               "private_sample", "private_perfect", "sample_position", "perfect_position", "lb_direction_ok",
-              "reward", "error"]
+              "reward", "baseline_position", "time_split", "error"]
 # With a Kaggle leaderboard, the true answers must rank at least this high (fraction of teams beaten or tied).
 # Lower means our metric or test split is not comparable to Kaggle's, so the position reward would be meaningless.
 MIN_PERFECT_POSITION = 0.9
@@ -120,6 +120,39 @@ def _drop_test_columns(pub_dir: Path, cols: list[str]) -> None:
     os.replace(tmp, test)  # a new file: hardlinked copies (built tasks) keep the old one until rebuilt
 
 
+def _set_sample_constant(sample: Path, values: dict) -> None:
+    """Overwrite the sample submission's target columns with Kaggle's placeholder values (task_overrides.yaml:
+    MLE-Dojo filled some sample submissions with the true answers). Writes a new file, so hardlinked sources stay."""
+    df = pd.read_csv(sample, dtype=str, keep_default_na=False)
+    want = {c: str(v) for c, v in values.items() if c in df.columns}
+    if all((df[c] == v).all() for c, v in want.items()):
+        return
+    for c, v in want.items():
+        df[c] = v
+    tmp = sample.with_suffix(".csv.tmp")
+    df.to_csv(tmp, index=False)
+    os.replace(tmp, sample)
+
+
+def _perfect_submission(ans: pd.DataFrame, sample_cols: list[str], id_col: str) -> pd.DataFrame:
+    """The true answers in submission format. Answers may carry extra columns, or hold one label column where the
+    submission wants one probability column per class (e.g. Class 0/1 -> class_0, class_1)."""
+    keep = [c for c in sample_cols if c in ans.columns]
+    if len(keep) == len(sample_cols):
+        return ans[keep]
+    labels = [c for c in ans.columns if c != id_col]
+    if len(labels) == 1:
+        lab = ans[labels[0]].astype(str)
+        out = pd.DataFrame({id_col: ans[id_col]})
+        for c in sample_cols[1:]:
+            hit = [v for v in lab.unique() if c.lower().endswith("_" + v.lower()) or c.lower() == v.lower()]
+            if len(hit) != 1:
+                return ans
+            out[c] = (lab == hit[0]).astype(float)
+        return out
+    return ans
+
+
 MEDIA = {"image": {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif", ".dcm", ".webp"},
          "audio": {".wav", ".mp3", ".flac", ".aif", ".aiff", ".ogg"},
          "video": {".mp4", ".avi", ".mov"}}
@@ -162,8 +195,15 @@ def split_one(task: Path, min_public_ids: int) -> dict:
     overrides = task_overrides()
     try:
         pub_dir, priv_dir = task / "prepared/public", task / "prepared/private"
+        if task.name in overrides["time_split"]:  # before anything reads the test set
+            import timesplit
+
+            ts = timesplit.apply(task, overrides["time_split"][task.name], cfg["sample_submission"])
+            row["time_split"] = f"train to {ts['train_to']}, test {ts['test_from']}..{ts['test_to']}"
         if task.name in overrides["drop_test_columns"]:
             _drop_test_columns(pub_dir, overrides["drop_test_columns"][task.name])
+        if task.name in overrides["sample_constant"]:
+            _set_sample_constant(pub_dir / cfg["sample_submission"], overrides["sample_constant"][task.name])
         ans = pd.read_csv(priv_dir / "answers.csv")
         sample = pub_dir / cfg["sample_submission"]
         sample_cols = list(pd.read_csv(sample, nrows=0).columns)
@@ -176,12 +216,15 @@ def split_one(task: Path, min_public_ids: int) -> dict:
         ans[~is_pub].to_csv(priv_dir / "private_answers.csv", index=False)
         # The true answers in submission format (answers may carry extra columns the submission doesn't have).
         perfect = priv_dir / "_perfect_submission.csv"
-        keep = [c for c in sample_cols if c in ans.columns]
-        (ans[keep] if len(keep) == len(sample_cols) else ans).to_csv(perfect, index=False)
+        _perfect_submission(ans, sample_cols, id_col).to_csv(perfect, index=False)
         mod, n_files = modality(pub_dir)
         row.update(id_column=id_col, test_ids=n_ids, public_ids=n_pub, private_ids=n_ids - n_pub,
                    public_mb=dir_mb(pub_dir), modality=mod, public_files=n_files)
-        lb = task / cfg["leaderboard"] if cfg.get("leaderboard") else None
+        # task_overrides.yaml no_leaderboard: Kaggle's leaderboard measures a different problem; the reward is then
+        # the score normalized between the sample submission and the true answers (harbor.py), with no medal.
+        no_lb = task.name in overrides["no_leaderboard"]
+        lb = task / cfg["leaderboard"] if cfg.get("leaderboard") and not no_lb else None
+        max_sample = float(overrides["max_sample_position"].get(task.name, MAX_SAMPLE_POSITION))
         hib = None
         for split in ("public", "private"):
             a = priv_dir / f"{split}_answers.csv"
@@ -194,20 +237,38 @@ def split_one(task: Path, min_public_ids: int) -> dict:
             hib = gp.get("higher_is_better", gs.get("higher_is_better"))
             row["error"] = row["error"] or (gs.get("error") or gp.get("error") or "")[:200]
         perfect.unlink()
+        if task.name in overrides["time_split"] and lb is not None:
+            # How a no-skill forecast (each series' last value) ranks on Kaggle: if it ranks high, our held-out period
+            # is easier than Kaggle's and the leaderboard is not comparable.
+            import timesplit
+
+            base = priv_dir / "_last_value.csv"
+            timesplit.last_value_baseline(task, overrides["time_split"][task.name], cfg["sample_submission"], base)
+            row["baseline_position"] = grade(task, priv_dir / "private_answers.csv", base, id_col, lb).get("position_score")
+            base.unlink()
         row["higher_is_better"] = hib
         row["lb_direction_ok"] = lb_direction_ok(lb, hib) if lb and hib is not None else None
         leak = _leak(ans, sample, id_col) or next(
             (r for r in (_leak(ans, f, id_col) for f in pub_dir.glob("*.csv") if f != sample) if r), None)
 
+        # A constant sample submission can have no score at all (e.g. rank correlation with a constant is NaN). With a
+        # leaderboard that is fine: the sample only anchors the bottom, and it ranks last. Without one, the
+        # normalized reward needs its score.
+        sample_unscored = (lb is not None and None not in (row["public_perfect"], row["private_perfect"])
+                           and row["public_sample"] is None and row["private_sample"] is None)
+        if sample_unscored:
+            row["sample_position"] = 0.0
+
         def beats(s):
             p, q = row[f"{s}_perfect"], row[f"{s}_sample"]
-            return p is not None and q is not None and (p > q if hib else p < q)
+            return p is not None and (sample_unscored or (q is not None and (p > q if hib else p < q)))
 
         if task.name in overrides["exclude"]:
             row["reason"] = "excluded (task_overrides.yaml): " + " ".join(str(overrides["exclude"][task.name]).split())
         elif leak:
             row["reason"] = leak
-        elif None in (row["public_sample"], row["public_perfect"], row["private_sample"], row["private_perfect"]):
+        elif not sample_unscored and None in (row["public_sample"], row["public_perfect"], row["private_sample"],
+                                              row["private_perfect"]):
             row["reason"] = "grading failed"
         elif not (beats("public") and beats("private")):
             row["reason"] = "true answers do not beat the sample submission"
@@ -218,12 +279,12 @@ def split_one(task: Path, min_public_ids: int) -> dict:
         elif lb and row["perfect_position"] is not None and row["perfect_position"] < MIN_PERFECT_POSITION:
             row["reason"] = (f"true answers rank only {row['perfect_position']:.2f} on the leaderboard "
                              f"(< {MIN_PERFECT_POSITION}): metric or scale differs from Kaggle's")
-        elif lb and row["sample_position"] is not None and row["sample_position"] > MAX_SAMPLE_POSITION:
+        elif lb and row["sample_position"] is not None and row["sample_position"] > max_sample:
             row["reason"] = (f"sample submission already ranks {row['sample_position']:.2f} on the leaderboard "
-                             f"(> {MAX_SAMPLE_POSITION}): leaderboard not comparable, reward would start saturated")
+                             f"(> {max_sample}): leaderboard not comparable, reward would start saturated")
         else:
             row["usable"] = True
-        row["reward"] = cfg.get("reward")
+        row["reward"] = "normalized_score (no_leaderboard)" if no_lb else cfg.get("reward")
         cfg.update(
             id_column=id_col,
             higher_is_better=hib,
