@@ -78,6 +78,7 @@ def prepare(competition_id: str) -> None:
     if is_dataset_prepared(comp):
         return
     zip_path = comp.raw_dir.parent / f"{competition_id}.zip"
+    _drop_partial_extraction(comp, zip_path)
     for attempt in (1, 2):
         if zip_path.exists() and not zipfile.is_zipfile(zip_path):
             zip_path.unlink()
@@ -88,6 +89,23 @@ def prepare(competition_id: str) -> None:
             zip_path.unlink(missing_ok=True)
             if attempt == 2:
                 raise
+
+
+def _drop_partial_extraction(comp, zip_path: Path) -> None:
+    """MLE-bench extracts the zip only into an EMPTY raw/: an extraction cut short (preemption) leaves raw/ partial
+    for good, and prepare.py then fails on a missing file (AI4Code: train_ancestors.csv). If raw/ lacks any member of
+    the zip, remove it and the half-written prepared/ so the next prepare extracts again."""
+    raw = comp.raw_dir
+    if not (raw.is_dir() and any(raw.iterdir()) and zipfile.is_zipfile(zip_path)):
+        return
+    with zipfile.ZipFile(zip_path) as z:
+        missing = [n for n in z.namelist() if not n.endswith("/") and not (raw / n).exists()]
+    if missing:
+        print(f"{comp.id}: raw/ is missing {len(missing)} of the zip's files (e.g. {missing[0]}): extracting again",
+              flush=True)
+        shutil.rmtree(raw)
+        for d in (comp.public_dir, comp.private_dir):
+            shutil.rmtree(d, ignore_errors=True)
 
 
 def _leaderboard(comp) -> Path:
