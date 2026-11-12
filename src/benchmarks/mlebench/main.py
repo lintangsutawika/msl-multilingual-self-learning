@@ -77,11 +77,17 @@ def main() -> None:
                     help="download + prepare missing competition data first (needs Kaggle credentials)")
     ap.add_argument("--output", default=str(DEFAULT_OUTPUT),
                     help="output dir (default harbor_tasks); written under mlebench-<split>/ subdirs")
+    ap.add_argument("--val-split", action="store_true",
+                    help="carve a validation set out of train with MLE-bench's own split (valsplit.py): validate "
+                         "scores it, MLE-bench's test stays the final grade")
+    ap.add_argument("--mount-data", action="store_true",
+                    help="don't copy the data into the task: the public data is bind-mounted read-only at run time "
+                         "(task.toml metadata.public_data) and the test answers go to tests/ (Babel / Singularity)")
     args = ap.parse_args()
 
     output = Path(args.output)
     targets = _resolve_targets(args)
-    made, failed = generate_all(targets, output, prepare_data=args.prepare)
+    made, failed = generate_all(targets, output, prepare_data=args.prepare, val_split=args.val_split, mount_data=args.mount_data)
 
     for cid, diff, d in made:
         print(f"generated {diff:6s} {cid} -> {d}")

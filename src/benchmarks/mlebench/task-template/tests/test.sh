@@ -8,24 +8,34 @@
 # This is the end-of-trial evaluation only; the PPO training reward comes from the
 # signed `validate` scores recorded in the rollout spool.
 set -euo pipefail
+export PATH=/usr/local/bin:$PATH  # the image's Python (with mlebench), not a system one
 SUBMISSION="/workspace/predictions.csv"
 COMPETITION="{comp_id}"
 mkdir -p /logs/verifier
 # Neutralize Kaggle's interactive rule-acceptance prompts (harmless no-op).
 python3 /opt/msl/neutralize_rules.py
-# Data is BAKED into the image; place it where mlebench grade reads it (no Kaggle).
-python3 - "$COMPETITION" <<'PY'
+# Test answers and leaderboard: tests/ (tasks built with --mount-data; uploaded only now) or baked into /workspace.
+PRIVATE=/workspace/private; LEADERBOARD=/workspace/leaderboard.csv
+[ -d /tests/private ] && PRIVATE=/tests/private
+[ -f /tests/leaderboard.csv ] && LEADERBOARD=/tests/leaderboard.csv
+# Place them where mlebench grade reads them (no Kaggle). Grading needs only the answers, not the public data.
+python3 - "$COMPETITION" "$PRIVATE" "$LEADERBOARD" <<'PY'
 import pathlib, shutil, sys
 from mlebench.registry import registry
 comp = registry.get_competition(sys.argv[1])
-for src, dst in (("/workspace/private", comp.private_dir), ("/workspace/public", comp.public_dir)):
-    if pathlib.Path(src).exists():
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+shutil.copytree(sys.argv[2], comp.private_dir, dirs_exist_ok=True)
 comp.leaderboard.parent.mkdir(parents=True, exist_ok=True)
-shutil.copy("/workspace/leaderboard.csv", comp.leaderboard)
+shutil.copy(sys.argv[3], comp.leaderboard)
 PY
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
+# Validation split (src/benchmarks/mlebench/valsplit.py): predictions.csv also covers the validation rows; grade only
+# MLE-bench's test rows, so the final score is MLE-bench's.
+if [ -f /workspace/private_val/valsplit.json ] && [ -f "$SUBMISSION" ]; then
+    python3 -c "import sys; sys.path.insert(0, '/opt/msl'); from grade_subset import subset_csv; subset_csv(*sys.argv[1:])" \
+        "$SUBMISSION" "$COMPETITION" "$PRIVATE" "$WORKDIR/predictions.csv"
+    SUBMISSION="$WORKDIR/predictions.csv"
+fi
 printf '{"competition_id":"%s","submission_path":"%s"}\n' "$COMPETITION" "$SUBMISSION" > "$WORKDIR/subs.jsonl"
 mlebench grade --submission "$WORKDIR/subs.jsonl" --output-dir "$WORKDIR/out" >"$WORKDIR/grade.log" 2>&1 || true
 python3 - "$WORKDIR" <<'PY'

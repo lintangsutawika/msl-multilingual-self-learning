@@ -11,9 +11,16 @@ _PREPARED = True
 def _ensure_prepared() -> None:
     return
 
+VAL_DIR = "/workspace/private_val"  # validation split: score only the validation rows (see validate.py)
+
 def grade() -> float:
     os.environ.setdefault("KAGGLE_CONFIG_DIR", "/root/.kaggle")
     _ensure_prepared()
+    if os.path.exists(os.path.join(VAL_DIR, "valsplit.json")):
+        import sys
+        sys.path.insert(0, "/opt/msl")
+        from grade_subset import grade as grade_rows
+        return grade_rows(SUBMISSION, COMPETITION, VAL_DIR)
     with tempfile.TemporaryDirectory() as work:
         subs = f"{work}/subs.jsonl"
         with open(subs, "w") as f:

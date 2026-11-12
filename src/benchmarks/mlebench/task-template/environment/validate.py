@@ -24,7 +24,7 @@ COMPETITION = "{comp_id}"
 KEY_FILE = "/etc/msl/score_key"
 # Never grade a file from these trees: grading the answers themselves (or any
 # root-owned file) as a "submission" would yield a perfect, validly signed score.
-PROTECTED = ("/workspace/private", "/opt/msl", "/etc", "/root", "/proc", "/sys", "/dev")
+PROTECTED = ("/workspace/private", "/workspace/private_val", "/opt/msl", "/etc", "/root", "/proc", "/sys", "/dev")
 
 
 def checked_copy(path: str, work: str) -> str:
@@ -59,8 +59,22 @@ def ensure_data() -> None:
         shutil.copy("/workspace/leaderboard.csv", comp.leaderboard)
 
 
+# With a validation split (src/benchmarks/mlebench/valsplit.py) the test inputs also hold validation rows, and
+# validate scores only those: MLE-bench's test answers are never used before the final grade.
+VAL_DIR = "/workspace/private_val"
+VAL_SPLIT = os.path.exists(os.path.join(VAL_DIR, "valsplit.json"))
+
+
 def grade(submission_path: str, work: str) -> float:
     os.environ.setdefault("KAGGLE_CONFIG_DIR", "/root/.kaggle")
+    if VAL_SPLIT:  # needs only the validation answers (no copy of the public data, which may be a large mount)
+        sys.path.insert(0, "/opt/msl")
+        from grade_subset import grade as grade_rows
+
+        try:
+            return grade_rows(submission_path, COMPETITION, VAL_DIR)
+        except ValueError as e:
+            sys.exit(f"validate: {e}")
     ensure_data()
     subs = f"{work}/subs.jsonl"
     with open(subs, "w") as f:

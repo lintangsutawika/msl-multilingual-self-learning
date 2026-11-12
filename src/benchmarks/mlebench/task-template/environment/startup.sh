@@ -21,9 +21,6 @@ lb.parent.mkdir(parents=True, exist_ok=True)
 if pathlib.Path('/workspace/private').exists():
     priv.mkdir(parents=True, exist_ok=True)
     shutil.copytree('/workspace/private', priv, dirs_exist_ok=True)
-if pathlib.Path('/workspace/public').exists():
-    pub.mkdir(parents=True, exist_ok=True)
-    shutil.copytree('/workspace/public', pub, dirs_exist_ok=True)
 if pathlib.Path('/workspace/leaderboard.csv').exists():
     shutil.copy('/workspace/leaderboard.csv', lb)
 print('[startup] baked private/public/leaderboard placed (no Kaggle)')

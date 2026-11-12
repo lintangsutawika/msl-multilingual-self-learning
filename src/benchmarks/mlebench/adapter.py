@@ -14,6 +14,7 @@ Generated tasks land under ``<output>/<competition_id>/``.
 
 from __future__ import annotations
 
+import json
 import secrets
 import shutil
 import urllib.request
@@ -101,16 +102,63 @@ def _leaderboard(comp) -> Path:
     return path
 
 
-def _bake(task: Path, comp) -> None:
+# Lines of the template Dockerfile that bake the data in; tasks built with mount_data drop them.
+BAKED_DATA_LINES = ("COPY public/ /workspace/public/", "COPY private/ /workspace/private/",
+                    "COPY leaderboard.csv /workspace/leaderboard.csv")
+
+
+def _bake(task: Path, comp, val_split: bool = False, mount_data: bool = False) -> None:
     """Copy the prepared public/private splits and the leaderboard into environment/,
-    where the Dockerfile COPYs them into the image (no Kaggle access at runtime)."""
+    where the Dockerfile COPYs them into the image (no Kaggle access at runtime).
+    With val_split, public/ is the validation-split public (MLE-bench's test inputs + validation inputs) and
+    private_val/ holds the validation answers (valsplit.py); private/ is MLE-bench's test answers either way."""
     env = task / "environment"
-    for src, name in ((comp.public_dir, "public"), (comp.private_dir, "private")):
+    public = comp.public_dir
+    if val_split:
+        from .valsplit import make
+
+        vs = make(comp.id)
+        public = vs / "public"
+        if mount_data:  # the answers stay on the host (validate_host.py grades there); only the marker goes in
+            (env / "private_val").mkdir()
+        else:
+            shutil.copytree(vs / "private_val", env / "private_val")
+        shutil.copy(vs / "valsplit.json", env / "private_val" / "valsplit.json")  # turns validation mode on
+    else:
+        (env / "private_val").mkdir()
+        (env / "private_val" / "NONE").write_text("no validation split: validate scores MLE-bench's test answers\n")
+    if mount_data:
+        # The public data stays where it is and is bind-mounted read-only at /workspace/public at run time (its
+        # path is in task.toml [metadata] public_data); the test answers and leaderboard go to tests/, which Harbor
+        # uploads only for the final grade (the agent never sees them). Only small files are copied.
+        shutil.copytree(comp.private_dir, task / "tests" / "private")
+        shutil.copy(_leaderboard(comp), task / "tests" / "leaderboard.csv")
+        df = env / "Dockerfile"
+        lines = [l for l in df.read_text().splitlines(keepends=True) if l.strip() not in BAKED_DATA_LINES]
+        # Rootless Singularity can't keep a root-only file from the agent: the signing key stays on the host too
+        # (environment/score_key, read by validate_host.py and the rollout forwarder), and the image gets an empty one.
+        lines = ["RUN mkdir -p /etc/msl && : > /etc/msl/score_key\n" if l.strip() == "COPY score_key /etc/msl/score_key"
+                 else l for l in lines]
+        df.write_text("".join(lines))
+        toml = task / "task.toml"
+        meta = f"[metadata]\npublic_data = {json.dumps(str(public.resolve()))}  # bind-mount at /workspace/public\n"
+        if val_split:
+            meta += f"val_answers = {json.dumps(str((vs / 'private_val').resolve()))}  # graded on the host (validate_host.py)\n"
+        text = toml.read_text().replace("[metadata]\n", meta, 1)
+        # Rootless Singularity fakes uids: a non-root agent's own files show up as root's, and tools that check
+        # ownership (tmux, ssh) refuse them. The agent user isolates nothing there (answers and key are on the host).
+        assert '\nuser = "agent"\n' in text
+        text = text.replace('\nuser = "agent"\n', '\nuser = "root"  # Babel/Singularity: see adapter._bake\n', 1)
+        # The verifier grades from tests/ with no Kaggle or SAIL access, so it gets no credentials.
+        toml.write_text("".join(l for l in text.splitlines(keepends=True) if not l.startswith("env = { KAGGLE_USERNAME")))
+        return
+    for src, name in ((public, "public"), (comp.private_dir, "private")):
         shutil.copytree(src, env / name)
     shutil.copy(_leaderboard(comp), env / "leaderboard.csv")
 
 
-def generate(competition_id: str, difficulty: str, output: Path) -> Path:
+def generate(competition_id: str, difficulty: str, output: Path, val_split: bool = False,
+             mount_data: bool = False) -> Path:
     """Instantiate one competition from the shared template into ``output``, with its
     prepared data baked in (run ``prepare`` first)."""
     comp = registry.get_competition(competition_id)
@@ -125,6 +173,11 @@ def generate(competition_id: str, difficulty: str, output: Path) -> Path:
         # Re-generate idempotently: wipe stale copies so fills are clean.
         shutil.rmtree(task)
     shutil.copytree(TEMPLATE, task, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__"))
+    valsplit_instruction = task / "instruction-valsplit.md"
+    if val_split:
+        valsplit_instruction.replace(task / "instruction.md")
+    else:
+        valsplit_instruction.unlink()
 
     fills = {
         "comp_id": competition_id,
@@ -132,6 +185,7 @@ def generate(competition_id: str, difficulty: str, output: Path) -> Path:
         "difficulty": difficulty,
         "metric_notes": _metric_notes(comp),
         "description": _problem_desc(comp),
+        "mlebench_rev": MLEBENCH_REV,
     }
     for path in (
         task / "task.toml",
@@ -143,7 +197,7 @@ def generate(competition_id: str, difficulty: str, output: Path) -> Path:
         task / "tests" / "test.sh",
     ):
         _fill(path, **fills)
-    _bake(task, comp)
+    _bake(task, comp, val_split, mount_data)
     # Per-task score-signing key: copied root-only into the image; the rollout forwarder
     # reads it (SCORE_KEYS_DIR/<comp>/environment/score_key) to verify `validate` scores.
     key.write_text(old_key or secrets.token_hex(32) + "\n")
@@ -159,6 +213,8 @@ def generate_all(
     targets: dict[str, str],
     output: Path,
     prepare_data: bool = False,
+    val_split: bool = False,
+    mount_data: bool = False,
 ) -> tuple[list[tuple[str, str, Path]], list[tuple[str, str]]]:
     """Generate all (competition_id -> difficulty) targets under output.
     Returns (made, failed); one competition failing does not stop the rest."""
@@ -171,7 +227,7 @@ def generate_all(
         try:
             if prepare_data:
                 prepare(cid)
-            made.append((cid, diff, generate(cid, diff, split_out)))
+            made.append((cid, diff, generate(cid, diff, split_out, val_split, mount_data)))
         except Exception as e:
             failed.append((cid, f"{type(e).__name__}: {e}"))
     return made, failed
