@@ -149,6 +149,11 @@ def _bake(task: Path, comp, val_split: bool = False, mount_data: bool = False) -
         # ownership (tmux, ssh) refuse them. The agent user isolates nothing there (answers and key are on the host).
         assert '\nuser = "agent"\n' in text
         text = text.replace('\nuser = "agent"\n', '\nuser = "root"  # Babel/Singularity: see adapter._bake\n', 1)
+        # Babel sweeps give each attempt what the MLE-Dojo sweep's SAIL sandboxes had: 4 CPUs, 16 GB. Singularity
+        # enforces only the memory (Harbor kills the trial above it); the CPUs are the Slurm job's, shared.
+        for k, v in (("cpus", "4"), ("memory_mb", "16384")):
+            assert f"\n{k} = " in text
+            text = "\n".join(f"{k} = {v}" if l.startswith(f"{k} = ") else l for l in text.split("\n"))
         # The verifier grades from tests/ with no Kaggle or SAIL access, so it gets no credentials.
         toml.write_text("".join(l for l in text.splitlines(keepends=True) if not l.startswith("env = { KAGGLE_USERNAME")))
         return

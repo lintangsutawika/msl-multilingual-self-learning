@@ -7,6 +7,8 @@
 # temperature/top_p set), at most MAX_GEN_TOKENS per response (the relay's cap, here vLLM's default max_tokens: the
 # agent sends no limit), MAX_ITERATIONS steps, OpenHands' condenser past CONDENSER_MAX_EVENTS events, no terminal
 # action longer than TERMINAL_MAX_TIMEOUT s, and the task's agent timeout (4 h) as the trial timeout.
+# Resources: each attempt as in the MLE-Dojo sweep (4 CPUs, 16 GB; Babel task builds set it), so 4 attempts need
+# 16 CPUs and 64 GB plus vLLM's host memory: --cpus-per-task=16 --mem=96G. The agent gets no GPU (the GPU serves vLLM).
 # Each trial installs the agent (uv, Python, OpenHands) from the internet; a trial whose download fails
 # (NetworkConnectionError, before the agent starts) is retried up to 3 times. Nothing else is retried.
 #
@@ -28,7 +30,7 @@
 #SBATCH --constraint=VRAM_48GB
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=96G
 #SBATCH --time=12:00:00
 #SBATCH --requeue
 #SBATCH --open-mode=append
