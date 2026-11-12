@@ -4,8 +4,8 @@
 
 For each competition that isn't prepared yet: look up its Kaggle download size, skip it if preparing it could leave
 less than --reserve-gb free (estimate: 3x the download, for the zip, the extraction and the prepared copy), else
-download + prepare it with MLE-bench's own scripts (adapter.prepare). With --delete-zips, Kaggle's zip is removed
-once the competition is prepared (MLE-bench keeps it; it is only needed to prepare again). A competition whose
+download + prepare it with MLE-bench's own scripts (adapter.prepare). With --delete-zips, Kaggle's zip and its extraction (raw/) are
+removed once the competition is prepared (MLE-bench keeps it; it is only needed to prepare again). A competition whose
 Kaggle rules are not accepted is recorded and skipped; rerun after accepting them (finished ones are skipped).
 Status: <mlebench data dir>/_prepare_queue.tsv.
 """
@@ -24,10 +24,13 @@ from .adapter import prepare
 
 
 def _kaggle_bytes(api, cid: str) -> int | None:
+    """Size of the competition's download zip, from the download's Content-Length (nothing is downloaded). The file
+    listing (competition_list_files) returns only its first page, so its sizes are far too small for big datasets."""
     try:
-        files = api.competition_list_files(cid)
-        files = getattr(files, "files", files)
-        return sum(int(getattr(f, "totalBytes", getattr(f, "total_bytes", 0)) or 0) for f in files) or None
+        resp = api.competitions_data_download_files_with_http_info(id=cid, _preload_content=False)[0]
+        n = resp.headers.get("Content-Length")
+        resp.close()
+        return int(n) if n else None
     except Exception:
         return None
 
@@ -36,7 +39,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--splits", default="low,medium,high")
     ap.add_argument("--reserve-gb", type=float, default=200.0)
-    ap.add_argument("--delete-zips", action="store_true", help="remove Kaggle's zip after preparing")
+    ap.add_argument("--delete-zips", action="store_true", help="remove Kaggle's zip and raw/ after preparing")
     a = ap.parse_args()
     from kaggle.api.kaggle_api_extended import KaggleApi
 
@@ -73,9 +76,10 @@ def main() -> None:
             try:
                 prepare(cid)
                 st, note = "ok", ""
-                if a.delete_zips:
+                if a.delete_zips:  # prepared = public/ + private/; the zip and its extraction are only for re-preparing
                     for z in (data / cid).glob("*.zip"):
                         z.unlink()
+                    shutil.rmtree(data / cid / "raw", ignore_errors=True)
             except Exception as e:
                 msg = f"{type(e).__name__}: {e}"
                 st = "rules" if ("403" in msg or "rules" in msg.lower()) else "error"
