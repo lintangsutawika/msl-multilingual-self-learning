@@ -14,7 +14,8 @@
 #
 #   # one task:
 #   sbatch --export=ALL,TASKS=/path/task src/benchmarks/mlebench/slurm/agent_babel.sbatch
-#   # every task of a dir, one array element each (resubmit the same command after a failure: done tasks are skipped):
+#   # every task of a dir, one array element each. Preempted elements requeue and resume by themselves; after a
+#   # cancel, time limit or crash, resubmit the same command: finished attempts are kept, done tasks skipped:
 #   T=/data/user_data/jeffc2/datasets/mlebench-babel/mlebench-low
 #   sbatch --array=0-$(($(ls -d $T/*/ | wc -l) - 1)) --export=ALL,TASKS_DIR=$T,SWEEP_NAME=qwen3.5-9b-k4 \
 #       src/benchmarks/mlebench/slurm/agent_babel.sbatch
@@ -56,18 +57,17 @@ export JOBS_DIR="${JOBS_DIR:-$(dirname "$(dirname "$FIRST")")/sweeps/${SWEEP_NAM
 mkdir -p "$JOBS_DIR"
 log() { echo "[agent $(date '+%m-%d %H:%M:%S')] $*"; }
 
-# Skip tasks this sweep already finished (all N_ATTEMPTS trials have a result); drop runs a preemption cut short.
+# Preemption-safe: each task is one Harbor job with a fixed name (<SWEEP_NAME>-<task>). Slurm requeues a preempted job
+# and run_babel.sh (RESUME=1) resumes it: finished attempts are kept, only the cut-off attempts rerun (from scratch:
+# an attempt's agent state can't be restored). A task is done once all N_ATTEMPTS attempts have a result that is not
+# an interruption (CancelledError) or a failed agent download (NetworkConnectionError).
 todo=()
 for t in $TASKS; do
   name=$(basename "$t")
-  done_=0
-  for j in "$JOBS_DIR/${SWEEP_NAME}-${name}-"*/; do
-    [ -d "$j" ] || continue
-    # a trial counts once it has a result, unless the agent never started (its install failed)
-    n=$(find "$j" -mindepth 2 -maxdepth 2 -name result.json -exec grep -L NetworkConnectionError {} + | wc -l)
-    if [ "$n" -ge "$N_ATTEMPTS" ]; then done_=1; else log "removing unfinished run $j"; rm -rf "$j" "${j%/}.validate.jsonl"; fi
-  done
-  [ "$done_" = 1 ] && log "skip $name: already done" || todo+=("$t")
+  j="$JOBS_DIR/${SWEEP_NAME}-${name}"
+  n=0
+  [ -d "$j" ] && n=$(find "$j" -mindepth 2 -maxdepth 2 -name result.json -exec grep -L -e CancelledError -e NetworkConnectionError {} + | wc -l)
+  if [ "$n" -ge "$N_ATTEMPTS" ]; then log "skip $name: all ${N_ATTEMPTS} attempts done"; else todo+=("$t"); [ "$n" -gt 0 ] && log "$name: resuming (${n}/${N_ATTEMPTS} done)"; fi
 done
 [ ${#todo[@]} -eq 0 ] && { log "nothing to do"; exit 0; }
 
@@ -91,6 +91,7 @@ done
 curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null || { log "vLLM not healthy after 30 min"; exit 1; }
 log "vLLM healthy; $(grep -o "Default sampling parameters.*" "${JOBS_DIR}/vllm-${TAG}.log" | head -1)"
 
+RESUME=1 RESUME_LLM_BASE_URL="http://127.0.0.1:${PORT}/v1" \
 AGENT="${AGENT:-src.rollout.openhands_agent:CondensingOpenHandsSDK}" JOB_PREFIX="$SWEEP_NAME" N_ATTEMPTS="$N_ATTEMPTS" \
 AGENT_ARGS="-m litellm_proxy/${MODEL} --ae LLM_API_KEY=EMPTY --ae LLM_BASE_URL=http://127.0.0.1:${PORT}/v1
   --ae LLM_MODEL=litellm_proxy/${MODEL} --ae MAX_ITERATIONS=${MAX_ITERATIONS:-200}

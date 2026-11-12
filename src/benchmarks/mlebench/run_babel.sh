@@ -12,7 +12,8 @@
 #
 # Env: AGENT (default oracle; e.g. src.rollout.openhands_agent:CondensingOpenHandsSDK), JOBS_DIR (default
 #      <task parent>/../jobs), JOB_PREFIX (default mlebench), N_ATTEMPTS (default 1),
-#      GRADER_PY (host grader's python),
+#      GRADER_PY (host grader's python), RESUME=1 (fixed job names; resume an existing job, see below),
+#      RESUME_LLM_BASE_URL (on resume: the agent's new LLM_BASE_URL),
 #      AGENT_ARGS (extra harbor args, e.g. --ae LLM_BASE_URL=... -m ...), SCRATCH (default /scratch/$USER/hsh).
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
@@ -31,15 +32,17 @@ for TASK in "$@"; do
         || { echo "SKIP $NAME: no metadata.public_data (build with --mount-data)"; rc=1; continue; }
     [ -d "$PUB" ] || { echo "SKIP $NAME: public data $PUB missing"; rc=1; continue; }
     JOBS_DIR=${JOBS_DIR:-$(dirname "$(dirname "$TASK")")/jobs}
-    JOB="${JOB_PREFIX:-mlebench}-$NAME-$(date +%Y%m%d-%H%M%S)"
+    # RESUME=1: a fixed job name, so a rerun (after preemption or resubmission) resumes the same Harbor job.
+    if [ "${RESUME:-0}" = 1 ]; then JOB="${JOB_PREFIX:-mlebench}-$NAME"; else JOB="${JOB_PREFIX:-mlebench}-$NAME-$(date +%Y%m%d-%H%M%S)"; fi
     MOUNTS=$(printf '{"type":"bind","source":"%s","target":"/workspace/public:ro"}' "$PUB")
     # Validation split: the answers and the signing key stay on the host; validate_host.py grades `validate` calls
     # there, and only its endpoint (url + token) is mounted into the container.
     VAL=$(.venv/bin/python -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["metadata"].get("val_answers",""))' "$TASK/task.toml")
     VPID=
     if [ -n "$VAL" ]; then
-        EP=$(mktemp -d "$SCRATCH/validate/$NAME.XXXX")
-        mkdir -p "$JOBS_DIR"
+        # A fixed path per job (the saved job config mounts it); a new token on every start.
+        EP="$JOBS_DIR/.endpoints/$JOB"
+        mkdir -p "$EP" && chmod 700 "$JOBS_DIR/.endpoints" "$EP" && rm -f "$EP/endpoint"
         "$GRADER_PY" src/benchmarks/mlebench/validate_host.py --competition "$NAME" --answers "$VAL" \
             --key "$TASK/environment/score_key" --endpoint-dir "$EP" --log "$JOBS_DIR/$JOB.validate.jsonl" \
             > "$EP/server.log" 2>&1 &
@@ -50,6 +53,27 @@ for TASK in "$@"; do
     fi
     MOUNTS="[$MOUNTS]"
     echo "=== $(date +%T) $NAME  public=$PUB  agent=$AGENT${VAL:+  host-validate=$EP}"
+    if [ "${RESUME:-0}" = 1 ] && [ -f "$JOBS_DIR/$JOB/config.json" ]; then
+        # Resume: Harbor keeps every finished trial and reruns the rest (no result.json, or a result whose error is
+        # one of the -f types: cut short by preemption, or the agent's download failed before it started). Only what
+        # changes between starts is updated in the saved config: the model server's URL (a new port per Slurm job).
+        .venv/bin/python - "$JOBS_DIR/$JOB/config.json" "${RESUME_LLM_BASE_URL:-}" <<'PY'
+import json, os, sys
+path, url = sys.argv[1], sys.argv[2]
+cfg = json.load(open(path))
+for agent in cfg.get("agents", []):
+    if url and isinstance(agent.get("env"), dict) and "LLM_BASE_URL" in agent["env"]:
+        agent["env"]["LLM_BASE_URL"] = url
+tmp = path + ".tmp"
+with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+    json.dump(cfg, f, indent=4)
+os.replace(tmp, path)
+PY
+        echo "    resuming $JOBS_DIR/$JOB ($(find "$JOBS_DIR/$JOB" -mindepth 2 -maxdepth 2 -name result.json | wc -l) trial results so far)"
+        "$HARBOR" job resume -p "$JOBS_DIR/$JOB" -f CancelledError -f NetworkConnectionError || rc=1
+        [ -n "$VPID" ] && { kill $VPID 2>/dev/null; wait $VPID 2>/dev/null; }
+        continue
+    fi
     # shellcheck disable=SC2086  # AGENT_ARGS is a list of flags
     "$HARBOR" run -p "$TASK" -a "$AGENT" -k "${N_ATTEMPTS:-1}" -n "${N_ATTEMPTS:-1}" \
         -e harbor_singularity_hpc.environment:SingularityWritableEnvironment \
