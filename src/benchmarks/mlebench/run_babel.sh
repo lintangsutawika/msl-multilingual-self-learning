@@ -13,7 +13,8 @@
 # Env: AGENT (default oracle; e.g. src.rollout.openhands_agent:CondensingOpenHandsSDK), JOBS_DIR (default
 #      <task parent>/../jobs), JOB_PREFIX (default mlebench), N_ATTEMPTS (default 1),
 #      GRADER_PY (host grader's python), RESUME=1 (fixed job names; resume an existing job, see below),
-#      RESUME_LLM_BASE_URL (on resume: the agent's new LLM_BASE_URL),
+#      RESUME_LLM_BASE_URL, RESUME_LLM_API_KEY (on resume: the agent's new LLM_BASE_URL, and its API key, which Harbor
+#      saves masked),
 #      AGENT_ARGS (extra harbor args, e.g. --ae LLM_BASE_URL=... -m ...), SCRATCH (default /scratch/$USER/hsh).
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
@@ -56,18 +57,44 @@ for TASK in "$@"; do
     if [ "${RESUME:-0}" = 1 ] && [ -f "$JOBS_DIR/$JOB/config.json" ]; then
         # Resume: Harbor keeps every finished trial and reruns the rest (no result.json, or a result whose error is
         # one of the -f types: cut short by preemption, or the agent's download failed before it started). Only what
-        # changes between starts is updated in the saved config: the model server's URL (a new port per Slurm job).
-        .venv/bin/python - "$JOBS_DIR/$JOB/config.json" "${RESUME_LLM_BASE_URL:-}" <<'PY'
-import json, os, sys
-path, url = sys.argv[1], sys.argv[2]
-cfg = json.load(open(path))
-for agent in cfg.get("agents", []):
-    if url and isinstance(agent.get("env"), dict) and "LLM_BASE_URL" in agent["env"]:
-        agent["env"]["LLM_BASE_URL"] = url
-tmp = path + ".tmp"
-with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-    json.dump(cfg, f, indent=4)
-os.replace(tmp, path)
+        # changes between starts is updated in the saved configs (the job's and every trial's): the model server's URL
+        # (a new port per Slurm job).
+        .venv/bin/python - "$JOBS_DIR/$JOB/config.json" "${RESUME_LLM_BASE_URL:-}" "${RESUME_LLM_API_KEY:-}" <<'PY'
+import glob, json, os, sys
+path, url, key = sys.argv[1], sys.argv[2], sys.argv[3]
+
+
+def set_url(agent):
+    # Harbor saves the API key masked ("****", "[REDACTED]", not consistently), so saved configs never match as
+    # read: write the real (non-secret) key back everywhere, with the new URL.
+    env = agent.get("env") if isinstance(agent, dict) else None
+    if not isinstance(env, dict):
+        return
+    if url and "LLM_BASE_URL" in env:
+        env["LLM_BASE_URL"] = url
+    if key and "LLM_API_KEY" in env:
+        env["LLM_API_KEY"] = key
+
+
+def rewrite(p, edit):
+    cfg = json.load(open(p))
+    edit(cfg)
+    tmp = p + ".tmp"
+    with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        json.dump(cfg, f, indent=4)
+    os.replace(tmp, p)
+
+
+rewrite(path, lambda c: [set_url(a) for a in c.get("agents", [])])
+# Harbor matches the finished trials' saved configs against the job's: they must carry the same URL too.
+job = os.path.dirname(path)
+for p in glob.glob(f"{job}/*/config.json"):
+    rewrite(p, lambda c: set_url(c.get("agent")))
+for p in glob.glob(f"{job}/*/result.json"):
+    try:
+        rewrite(p, lambda c: set_url((c.get("config") or {}).get("agent")))
+    except (OSError, ValueError):
+        pass  # unreadable result: Harbor reruns that trial anyway
 PY
         echo "    resuming $JOBS_DIR/$JOB ($(find "$JOBS_DIR/$JOB" -mindepth 2 -maxdepth 2 -name result.json | wc -l) trial results so far)"
         "$HARBOR" job resume -p "$JOBS_DIR/$JOB" -f CancelledError -f NetworkConnectionError || rc=1

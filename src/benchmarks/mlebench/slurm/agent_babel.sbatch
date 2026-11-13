@@ -91,7 +91,7 @@ done
 curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null || { log "vLLM not healthy after 30 min"; exit 1; }
 log "vLLM healthy; $(grep -o "Default sampling parameters.*" "${JOBS_DIR}/vllm-${TAG}.log" | head -1)"
 
-RESUME=1 RESUME_LLM_BASE_URL="http://127.0.0.1:${PORT}/v1" \
+RESUME=1 RESUME_LLM_BASE_URL="http://127.0.0.1:${PORT}/v1" RESUME_LLM_API_KEY=EMPTY \
 AGENT="${AGENT:-src.rollout.openhands_agent:CondensingOpenHandsSDK}" JOB_PREFIX="$SWEEP_NAME" N_ATTEMPTS="$N_ATTEMPTS" \
 AGENT_ARGS="-m litellm_proxy/${MODEL} --ae LLM_API_KEY=EMPTY --ae LLM_BASE_URL=http://127.0.0.1:${PORT}/v1
   --ae LLM_MODEL=litellm_proxy/${MODEL} --ae MAX_ITERATIONS=${MAX_ITERATIONS:-200}
