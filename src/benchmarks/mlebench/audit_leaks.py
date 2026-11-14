@@ -5,7 +5,8 @@ what it sees (valsplit/public, mounted at /workspace/public)?
 
 For each competition, with A = answer columns (private answers minus the id column) and ids = test + validation ids:
   * table files (csv, json, csv/json inside zips): rows whose id is in ids may not carry any column of A with
-    non-constant values (a sample submission's constant values are fine);
+    values that agree with the answers (half or more equal, or correlation >= 0.9 for numbers; a sample
+    submission's constant or random placeholder values are fine);
   * files of the train side (outside the spec's test_side entries) may not be named after a test/validation id
     (an image in train/ comes with its label in a train table);
   * TFRecords may not hold a `target` feature in test-side records.
@@ -33,6 +34,22 @@ from .valsplit import SPECS, Spec, _file_ids
 
 SKIP_SUFFIXES = {".md", ".txt", ".rtf"}
 
+
+
+def _agrees(rows: pd.DataFrame, answers: pd.DataFrame, id_col: str, col: str) -> bool:
+    """Do a file's values of answer column `col` give the answers away? MLE-bench's sample submissions often hold
+    random placeholders (petfinder, essay scores) or an evenly spaced sequence (google-quest): those vary but agree
+    with the answers only by chance. A leak: half or more equal to the answers, or (numbers) correlation >= 0.9."""
+    if col not in answers.columns:
+        return True  # can't compare: keep the conservative verdict
+    m = rows[[id_col, col]].astype(str).merge(answers[[id_col, col]].astype(str), on=id_col, suffixes=("_f", "_a"))
+    if not len(m):
+        return False
+    if (m[col + "_f"] == m[col + "_a"]).mean() >= 0.5:
+        return True
+    f, a = pd.to_numeric(m[col + "_f"], errors="coerce"), pd.to_numeric(m[col + "_a"], errors="coerce")
+    ok = f.notna() & a.notna()
+    return bool(ok.sum() > 2 and f[ok].nunique() > 1 and a[ok].nunique() > 1 and f[ok].corr(a[ok]) >= 0.9)
 
 def _tables(p: Path):
     """(name, DataFrame) for a csv/json file or each csv/json inside a zip."""
@@ -82,8 +99,11 @@ def audit(cid: str) -> list[str]:
     answer_cols = [c for c in test_ans.columns if c != id_col and c in sample_cols] or \
         [c for c in test_ans.columns if c != id_col]
     file_ids = _file_ids(ids, spec)
-    native_overlap = cid == "nomad2018-predict-transparent-conductors"
+    # Train and test numbered from 1 each by Kaggle (nomad) or by MLE-bench's prepare.py (ventilator): a train id equal
+    # to a test id is another row; train-side files are checked against the validation ids (offset past both).
+    native_overlap = cid in ("nomad2018-predict-transparent-conductors", "ventilator-pressure-prediction")
     val_ids = set(val_ans[id_col])
+    answers = pd.concat([test_ans, val_ans]).drop_duplicates(id_col)
     problems = []
     for p in sorted(pub.rglob("*")):
         if not p.is_file() or p.suffix in SKIP_SUFFIXES:
@@ -110,13 +130,14 @@ def audit(cid: str) -> list[str]:
                     continue
                 check = val_ids if native_overlap and not test_side else ids
                 rows = df[df[id_col].astype(str).isin(check)]
-                leaked = [c for c in answer_cols if c in rows.columns and rows[c].nunique() > 1]
+                leaked = [c for c in answer_cols if c in rows.columns and rows[c].nunique() > 1
+                          and _agrees(rows, answers, id_col, c)]
                 if len(rows) and leaked:
                     problems.append(f"{rel} ({name}): {len(rows)} test/validation rows carry answer columns {leaked}")
             continue
         if not test_side and (p.stem in file_ids or p.stem.split("_")[0] in file_ids and spec.file_id):
             problems.append(f"{rel}: train-side file named after a test/validation id")
-    if native_overlap:  # content: no test/validation material's inputs in train
+    if cid == "nomad2018-predict-transparent-conductors":  # content: no test/validation material's inputs in train
         train = pd.read_csv(pub / "train.csv", dtype=str)
         test = pd.read_csv(pub / "test.csv", dtype=str)
         feats = [c for c in test.columns if c != id_col]

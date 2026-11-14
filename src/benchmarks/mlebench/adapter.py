@@ -225,7 +225,8 @@ def generate(competition_id: str, difficulty: str, output: Path, val_split: bool
     # reads it (SCORE_KEYS_DIR/<comp>/environment/score_key) to verify `validate` scores.
     key.write_text(old_key or secrets.token_hex(32) + "\n")
     key.chmod(0o600)
-    for _bin in ("tests/test.sh", "environment/startup.sh", "environment/bin/validate", "environment/bin/validate-root"):
+    for _bin in ("tests/test.sh", "solution/solve.sh", "environment/startup.sh", "environment/bin/validate",
+                 "environment/bin/validate-root"):
         _p = task / _bin
         if _p.exists():
             _p.chmod(0o755)

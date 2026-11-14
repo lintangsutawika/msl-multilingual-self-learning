@@ -116,6 +116,26 @@ SPECS: dict[str, Spec] = {
     "jigsaw-toxic-comment-classification-challenge": Spec(raw={"train.csv": "train.csv"}, prepare="jigsaw",
                                                           test_side=["test.csv", "sample_submission.csv"]),
     "mlsp-2013-birds": Spec(custom="mlsp"),
+    # --- medium / high: MLE-bench's prepare.py is a plain (seeded) split of train ---
+    **{cid: Spec(raw={"train.csv": "train.csv"}, test_side=["test.csv", "sample_submission.csv"]) for cid in (
+        "chaii-hindi-and-tamil-question-answering", "google-quest-challenge", "learning-agency-lab-automated-essay-scoring-2",
+        "lmsys-chatbot-arena", "tweet-sentiment-extraction", "us-patent-phrase-to-phrase-matching")},
+    "ventilator-pressure-prediction": Spec(raw={"train.csv": "train.csv"}, remap="ventilator",  # split by breath_id
+                                           test_side=["test.csv", "sample_submission.csv"]),
+    "petfinder-pawpularity-score": Spec(raw={"train.csv": "train.csv", "train": "train"},
+                                        test_side=["test", "test.csv", "sample_submission.csv"]),
+    "osic-pulmonary-fibrosis-progression": Spec(raw={"train.csv": "train.csv", "train": "train"},  # by patient
+                                                test_side=["test", "test.csv", "sample_submission.csv"]),
+    "predict-volcanic-eruptions-ingv-oe": Spec(raw={"train.csv": "train.csv", "train": "train"},
+                                               test_side=["test", "sample_submission.csv"]),
+    "AI4Code": Spec(raw={"train": "train", "train_ancestors.csv": "train_ancestors.csv",  # by notebook ancestry
+                         "train_orders.csv": "train_orders.csv"}, test_side=["test", "sample_submission.csv"]),
+    # champs: split by molecule; MLE-bench's public structures/ and per-atom tables cover train molecules only, so the
+    # rerun drops the validation molecules from them too (train side, replaced).
+    "champs-scalar-coupling": Spec(raw={n: n for n in (
+        "train.csv", "structures.csv", "structures", "dipole_moments.csv", "magnetic_shielding_tensors.csv",
+        "mulliken_charges.csv", "potential_energy.csv", "scalar_coupling_contributions.csv")},
+        test_side=["test.csv", "sample_submission.csv"]),
     "ranzcr-clip-catheter-line-classification": Spec(
         raw={"train.csv": "train.csv", "train_annotations.csv": "train_annotations.csv", "train": "train"},
         test_side=["test", "sample_submission.csv"]),
@@ -282,8 +302,17 @@ def _remap_siim(pub, priv, ans_rel, test_ids):
     _rename(sorted((pub / "tfrecords").glob("test*.tfrec")), lambda s: f"test{int(s[4:6]) + n:02d}{s[6:]}")
 
 
+def _remap_ventilator(pub, priv, ans_rel, test_ids):
+    # prepare.py numbers the rows of train and test from 1 each (breath_id keeps Kaggle's values): start the
+    # validation rows' ids after both, so every id is unique.
+    train_ids = pd.read_csv(pub / "train.csv", usecols=["id"])["id"]
+    f = _remap_int(max(max(int(i) for i in test_ids), int(train_ids.max())))
+    for path in (pub / "test.csv", pub / "sample_submission.csv", priv / ans_rel):
+        _map_csv(path, "id", f)
+
+
 REMAPS = {"siim": _remap_siim, "plant": _remap_plant, "nomad": _remap_nomad, "dogs_vs_cats": _remap_dogs_vs_cats,
-          "text_norm": _remap_text_norm}
+          "text_norm": _remap_text_norm, "ventilator": _remap_ventilator}
 
 
 # ---------------------------------------------------------------------------------------------------- the split
