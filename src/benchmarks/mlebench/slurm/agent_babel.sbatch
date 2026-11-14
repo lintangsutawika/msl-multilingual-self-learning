@@ -66,7 +66,16 @@ for t in $TASKS; do
   name=$(basename "$t")
   j="$JOBS_DIR/${SWEEP_NAME}-${name}"
   n=0
-  [ -d "$j" ] && n=$(find "$j" -mindepth 2 -maxdepth 2 -name result.json -exec grep -L -e CancelledError -e NetworkConnectionError {} + | wc -l)
+  # by exception type (a timed-out attempt's traceback also mentions CancelledError, so no grep)
+  [ -d "$j" ] && n=$(python3 - "$j" <<'EOF'
+import glob, json, sys
+n = 0
+for p in glob.glob(sys.argv[1] + "/*/result.json"):
+    e = (json.load(open(p)).get("exception_info") or {}).get("exception_type")
+    n += e not in ("CancelledError", "NetworkConnectionError")
+print(n)
+EOF
+)
   if [ "$n" -ge "$N_ATTEMPTS" ]; then log "skip $name: all ${N_ATTEMPTS} attempts done"; else todo+=("$t"); [ "$n" -gt 0 ] && log "$name: resuming (${n}/${N_ATTEMPTS} done)"; fi
 done
 [ ${#todo[@]} -eq 0 ] && { log "nothing to do"; exit 0; }
