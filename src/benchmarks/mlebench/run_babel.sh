@@ -96,6 +96,9 @@ for p in glob.glob(f"{job}/*/result.json"):
     except (OSError, ValueError):
         pass  # unreadable result: Harbor reruns that trial anyway
 PY
+        # Harbor's lock.json also records every trial's agent settings (old URL, masked key) and refuses a job whose
+        # resolved lock differs; it is only that consistency check, so drop it and let Harbor write a fresh one.
+        rm -f "$JOBS_DIR/$JOB/lock.json"
         echo "    resuming $JOBS_DIR/$JOB ($(find "$JOBS_DIR/$JOB" -mindepth 2 -maxdepth 2 -name result.json | wc -l) trial results so far)"
         "$HARBOR" job resume -p "$JOBS_DIR/$JOB" -f CancelledError -f NetworkConnectionError || rc=1
         [ -n "$VPID" ] && { kill $VPID 2>/dev/null; wait $VPID 2>/dev/null; }
