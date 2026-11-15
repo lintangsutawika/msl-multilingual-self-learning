@@ -20,7 +20,8 @@
 #   sbatch --array=0-$(($(ls -d $T/*/ | wc -l) - 1)) --export=ALL,TASKS_DIR=$T,SWEEP_NAME=qwen3.5-9b-k4 \
 #       src/benchmarks/mlebench/slurm/agent_babel.sbatch
 #
-# Env: TASKS (task dirs, space-separated) or TASKS_DIR (+ SLURM_ARRAY_TASK_ID picks one, in `ls` order);
+# Env: TASKS (task dirs, space-separated) or TASKS_DIR (+ SLURM_ARRAY_TASK_ID picks one, in `ls` order: don't add or
+#      remove task dirs there while the array runs, or a requeued element picks another task);
 #      MODEL (default Qwen/Qwen3.5-9B); N_ATTEMPTS (4, run at once); SWEEP_NAME (default agent; jobs go to
 #      <task parent>/../sweeps/<SWEEP_NAME>); MAX_GEN_TOKENS (16384), MAX_ITERATIONS (200),
 #      CONDENSER_MAX_EVENTS (120), TERMINAL_MAX_TIMEOUT (1800): as in scripts/rollout.sh.

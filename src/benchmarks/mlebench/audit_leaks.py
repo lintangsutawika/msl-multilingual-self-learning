@@ -11,7 +11,9 @@ For each competition, with A = answer columns (private answers minus the id colu
     (an image in train/ comes with its label in a train table);
   * TFRecords may not hold a `target` feature in test-side records.
 Answer columns are what the agent must predict: the sample submission's columns (MLE-bench's answers file sometimes
-holds whole test rows, inputs included). Two competitions need their own rule:
+holds whole test rows, inputs included), minus the inputs MLE-bench's own public test tables show (facebook's sample
+repeats Title and Body). JSON-lines test files (tensorflow2-qa) may hold no field MLE-bench's own test records lack.
+Two competitions need their own rule:
   * nomad2018: Kaggle numbers train and test from 1 each, so a train id equal to a test id is another material; train
     tables are checked against validation ids (offset past both) and by content (no test/validation material's
     inputs appear in train);
@@ -30,7 +32,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .valsplit import SPECS, Spec, _file_ids
+from .valsplit import SPECS, Spec, _file_ids, _load_answers
 
 SKIP_SUFFIXES = {".md", ".txt", ".rtf"}
 
@@ -74,6 +76,29 @@ def _tables(p: Path):
                         yield f"{p.name}:{n}", df
 
 
+# Columns that are part of a row's key, not its answer: the sample submission must copy them.
+KEY_COLS = {"smartphone-decimeter-2022": {"UnixTimeMillis"}}  # a row is (tripId, UnixTimeMillis)
+
+
+def _test_input_cols(pub0: Path, spec: Spec, id_col: str) -> set[str]:
+    """Columns of MLE-bench's own public test-side tables keyed by the answer id (header only), sample submissions
+    excluded: inputs shown per answer row (facebook's test.csv: Id, Title, Body). A table keyed otherwise (osic's
+    test.csv: Patient, with a baseline FVC) says nothing about the answer rows."""
+    cols: set[str] = set()
+    for name in spec.test_side:
+        p = pub0 / name
+        if "sample" in name.lower() or not p.is_file():
+            continue
+        heads = []
+        if p.suffix == ".csv":
+            heads.append(set(pd.read_csv(p, nrows=0).columns))
+        elif p.suffix == ".zip":
+            with zipfile.ZipFile(p) as z:
+                heads += [set(pd.read_csv(z.open(n), nrows=0).columns) for n in z.namelist() if n.endswith(".csv")]
+        cols |= set().union(*(h for h in heads if id_col in h))
+    return cols
+
+
 def _check_text_norm_sample(pub: Path, sample: pd.DataFrame) -> list[str]:
     lang = next(pub.glob("*_test_2.csv.zip")).name[:2]
     (_, test), = _tables(pub / f"{lang}_test_2.csv.zip")
@@ -91,13 +116,18 @@ def audit(cid: str) -> list[str]:
     pub = vs / "public"
     meta = json.loads((vs / "valsplit.json").read_text())
     id_col = meta["id_column"]
-    test_ans = pd.read_csv(comp.answers, dtype=str, keep_default_na=False)
-    val_ans = pd.read_csv(vs / "private_val" / meta["answers"], dtype=str, keep_default_na=False)
+    def load(p: Path) -> pd.DataFrame:
+        return _load_answers(p) if p.suffix == ".jsonl" else pd.read_csv(p, dtype=str, keep_default_na=False)
+
+    test_ans, val_ans = load(comp.answers), load(vs / "private_val" / meta["answers"])
     ids = set(test_ans[id_col]) | set(val_ans[id_col])
     samples = [q for q in pub.rglob("*") if q.is_file() and "sample" in q.name.lower()]
     sample_cols = {c for q in samples for _, df in _tables(q) for c in df.columns}
-    answer_cols = [c for c in test_ans.columns if c != id_col and c in sample_cols] or \
-        [c for c in test_ans.columns if c != id_col]
+    input_cols = _test_input_cols(comp.public_dir, spec, id_col) | KEY_COLS.get(cid, set())
+    answer_cols = [c for c in test_ans.columns if c != id_col and c in sample_cols and c not in input_cols] or \
+        [c for c in test_ans.columns if c != id_col and c not in input_cols]
+    if dropped := sorted(c for c in sample_cols & input_cols if c in test_ans.columns and c != id_col):
+        print(f"       note: not answer columns (MLE-bench's public test shows them as inputs): {dropped}")
     file_ids = _file_ids(ids, spec)
     # Train and test numbered from 1 each by Kaggle (nomad) or by MLE-bench's prepare.py (ventilator): a train id equal
     # to a test id is another row; train-side files are checked against the validation ids (offset past both).
@@ -110,6 +140,16 @@ def audit(cid: str) -> list[str]:
             continue
         rel = p.relative_to(pub)
         test_side = rel.parts[0] in spec.test_side
+        if p.suffix == ".jsonl" and test_side:
+            mine = comp.public_dir / rel
+            allowed = set(json.loads(mine.open().readline())) if mine.exists() else set()
+            extra = set()
+            with open(p) as f:
+                for line in f:
+                    extra |= set(json.loads(line)) - allowed
+            if extra or not allowed:
+                problems.append(f"{rel}: records hold fields MLE-bench's test records don't: {sorted(extra)}")
+            continue
         if p.suffix == ".tfrec":
             if p.name.startswith("test"):
                 import tensorflow as tf

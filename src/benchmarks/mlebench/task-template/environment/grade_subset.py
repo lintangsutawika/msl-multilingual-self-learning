@@ -25,19 +25,27 @@ def _answers(comp_id: str, answers_dir: str):
     return comp, load_answers(Path(answers_dir) / rel)
 
 
-def _id_col(sub: pd.DataFrame, ans) -> str | None:
-    if not isinstance(ans, pd.DataFrame):
-        return None
-    first = sub.columns[0] if len(sub.columns) else None
-    return first if first in ans.columns else None
+def _ids(sub: pd.DataFrame, ans) -> tuple[str, set[str]] | None:
+    """The submission's id column and the answers' ids, or None if the answers aren't keyed by it. Answers are a
+    DataFrame, or a list of records (JSON-lines answers: tensorflow2-qa)."""
+    col = sub.columns[0] if len(sub.columns) else None
+    if isinstance(ans, pd.DataFrame) and col in ans.columns:
+        return col, set(ans[col].astype(str))
+    if isinstance(ans, list) and ans and isinstance(ans[0], dict) and col in ans[0]:
+        return col, {str(r[col]) for r in ans}
+    return None
 
 
 def _subset(sub: pd.DataFrame, ans) -> pd.DataFrame:
-    col = _id_col(sub, ans)
-    if col is None:
+    found = _ids(sub, ans)
+    if found is None:
         return sub
-    keep = set(ans[col].astype(str))
-    return sub[sub[col].astype(str).isin(keep)].reset_index(drop=True)
+    col, keep = found
+    s = sub[col].astype(str)
+    m = s.isin(keep)
+    if not m.any():  # one answer row per several submission rows: tensorflow2-qa's <example_id>_short / _long
+        m = s.str.rsplit("_", n=1).str[0].isin(keep)
+    return sub[m].reset_index(drop=True)
 
 
 def grade(submission_csv: str, comp_id: str, answers_dir: str) -> float:

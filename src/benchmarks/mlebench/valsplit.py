@@ -32,6 +32,8 @@ from pathlib import Path
 import pandas as pd
 
 SEED = 0  # shuffles the validation rows into the test files
+if not hasattr(pd.DataFrame, "applymap"):  # pandas 3 renamed it to map; MLE-bench's prepare.py (tgs-salt) asserts with it
+    pd.DataFrame.applymap = pd.DataFrame.map
 
 
 @dataclass
@@ -44,6 +46,11 @@ class Spec:
     # raw zip prepare.py extracts -> (public zip, folder prefix): MLE-bench re-zipped some data without the folder
     # prefix Kaggle's zip had (aerial's train.zip holds x.jpg, Kaggle's held train/x.jpg)
     raw_rezip: dict[str, tuple[str, str]] = field(default_factory=dict)
+    # archive prepare.py extracts into raw/ itself -> {path under raw/: source}: the archive is shipped EMPTY and its
+    # members are put in place beforehand (no multi-GB re-zip). A source is a public entry (hardlinked) or
+    # "<public .7z/.zip>:<member>" (extracted from it: statoil's 7z files hold train.json, prepare.py wants
+    # data/processed/train.json).
+    raw_extracted: dict[str, dict[str, str]] = field(default_factory=dict)
     # name of a REMAPS function: prepare.py renumbers ids (Test_0.., 1..), so validation ids would equal MLE-bench's
     # test ids. MLE-bench's test set is left as is; the validation rows get ids after the test ids instead.
     remap: str | None = None
@@ -51,7 +58,8 @@ class Spec:
     # writes is train-side and REPLACES MLE-bench's version (it no longer holds the validation rows).
     test_side: list[str] = field(default_factory=list)
     # how a file is named from an answer id: None = the id itself; "image" = the part before the first "_"
-    # (denoising's answers are pixels "<image>_<row>_<col>", its files <image>.png)
+    # (denoising's answers are pixels "<image>_<row>_<col>", its files <image>.png); "trip" = all but the last "-"
+    # part (smartphone's answers are trips "<drive>-<phone>", its test folders <drive>/<phone>/)
     file_id: str | None = None
     # name of a PREPARES function used instead of MLE-bench's prepare.py, for competitions whose prepare.py has no
     # split to repeat (MLE-bench used Kaggle's own labelled test set)
@@ -139,6 +147,33 @@ SPECS: dict[str, Spec] = {
     "ranzcr-clip-catheter-line-classification": Spec(
         raw={"train.csv": "train.csv", "train_annotations.csv": "train_annotations.csv", "train": "train"},
         test_side=["test", "sample_submission.csv"]),
+    "kuzushiji-recognition": Spec(  # prepare.py extracts train_images.zip (flat, as MLE-bench re-zipped it)
+        raw={"train.csv": "train.csv", "train_images.zip": "train_images.zip",
+             "unicode_translation.csv": "unicode_translation.csv"},
+        test_side=["test_images.zip", "sample_submission.csv"]),
+    "tensorflow2-question-answering": Spec(raw={"simplified-nq-train.jsonl": "simplified-nq-train.jsonl"},
+                                           test_side=["simplified-nq-test.jsonl", "sample_submission.csv"]),
+    "smartphone-decimeter-2022": Spec(raw={"train": "train", "metadata": "metadata"},  # split by drive date
+                                      test_side=["test", "sample_submission.csv"], file_id="trip"),
+    "facebook-recruiting-iii-keyword-extraction": Spec(raw_extracted={"Train.zip": {"Train.csv": "train.csv"}},
+                                                       test_side=["test.csv", "sample_submission.csv"]),
+    "statoil-iceberg-classifier-challenge": Spec(
+        raw_extracted={"train.json.7z": {"data/processed/train.json": "train.json.7z:train.json"},
+                       "test.json.7z": {"data/processed/test.json": "test.json.7z:test.json"}},
+        test_side=["test.json.7z", "sample_submission.csv.7z"]),
+    # split by TFRecord file; the test TFRecords (renumbered) are MLE-bench's + ours, labels stripped from all
+    "cassava-leaf-disease-classification": Spec(
+        raw={n: n for n in ("train.csv", "train_tfrecords", "train_images", "label_num_to_disease_map.json")},
+        remap="cassava", keep_test=["test_tfrecords/*.tfrec"], post="cassava",
+        test_side=["test_images", "sample_submission.csv"]),
+    "tensorflow-speech-recognition-challenge": Spec(raw_extracted={"train.7z": {"train/audio": "train/audio"}},
+                                                    remap="speech", test_side=["test", "sample_submission.csv"]),
+    "tgs-salt-identification-challenge": Spec(  # depths.csv: MLE-bench's has train ids only, so ours train' only
+        raw={"depths.csv": "depths.csv"},
+        raw_extracted={"competition_data.zip": {"competition_data/train.csv": "train.csv",
+                                                "competition_data/train/images": "train/images",
+                                                "competition_data/train/masks": "train/masks"}},
+        test_side=["test", "sample_submission.csv"]),
 }
 
 
@@ -198,8 +233,45 @@ def _merge_zip(a: Path, b: Path, out: Path, tmp: Path) -> None:
                     zo.writestr(z.getinfo(n), z.read(n))
 
 
+def _merge_lines(a: Path, b: Path, out: Path) -> None:
+    """JSON lines (tensorflow2-qa's test jsonl): union of the records, shuffled, text kept as is."""
+    rows = a.read_bytes().splitlines() + b.read_bytes().splitlines()
+    random.Random(SEED).shuffle(rows)
+    out.write_bytes(b"\n".join(rows) + b"\n")
+
+
+def _merge_7z(a: Path, b: Path, out: Path, tmp: Path) -> None:
+    """7z of one table (statoil's test.json.7z, sample_submission.csv.7z): merge the table."""
+    import py7zr
+
+    tmp = Path(tempfile.mkdtemp(dir=tmp))
+    names = []
+    for z, d in ((a, tmp / "a"), (b, tmp / "b")):
+        with py7zr.SevenZipFile(z) as s:
+            n = [f.filename for f in s.list() if not f.is_directory]
+            s.extractall(d)
+        if len(n) != 1:
+            raise ValueError(f"{z.name}: expected one file inside, got {n}")
+        names.append(n[0])
+    if names[0] != names[1] or not names[0].endswith((".csv", ".json")):
+        raise ValueError(f"{out.name}: can't merge {names}")
+    merged = tmp / Path(names[0]).name
+    (_merge_csv if merged.suffix == ".csv" else _merge_json)(tmp / "a" / names[0], tmp / "b" / names[0], merged)
+    with py7zr.SevenZipFile(out, "w") as s:
+        s.write(merged, arcname=names[0])
+
+
 def _file_ids(ids: set[str], spec: Spec) -> set[str]:
-    return {i.split("_")[0] for i in ids} if spec.file_id == "image" else ids
+    if spec.file_id == "image":
+        return {i.split("_")[0] for i in ids}
+    if spec.file_id == "trip":
+        return {i.rsplit("-", 1)[0] for i in ids}
+    return ids
+
+
+def _has_id(rel: Path, ids: set[str]) -> bool:
+    """Is some part of the path (a folder or file, by name or name without suffix) one of the ids?"""
+    return any(q in ids or Path(q).stem in ids for q in rel.parts)
 
 
 def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str]) -> None:
@@ -210,7 +282,7 @@ def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str]) -> None:
         _link_tree(b, out)
         for p in a.rglob("*"):
             rel = p.relative_to(a)
-            if p.is_file() and Path(rel.parts[0]).stem in test_ids:
+            if p.is_file() and _has_id(rel, test_ids):
                 q = out / rel
                 if q.exists():
                     raise ValueError(f"{out.name}: validation file {rel} collides with a test file")
@@ -222,6 +294,10 @@ def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str]) -> None:
         _merge_json(a, b, out)
     elif a.suffix == ".zip":
         _merge_zip(a, b, out, tmp)
+    elif a.suffix == ".jsonl":
+        _merge_lines(a, b, out)
+    elif a.suffix == ".7z":
+        _merge_7z(a, b, out, tmp)
     else:
         raise ValueError(f"don't know how to merge {a.name}")
 
@@ -286,6 +362,25 @@ def _remap_dogs_vs_cats(pub, priv, ans_rel, test_ids):
             z.write(p, arcname=p.name)
 
 
+def _remap_cassava(pub, priv, ans_rel, test_ids):
+    """Ids are Kaggle's image names (kept); only the test TFRecords are renumbered (ld_test00-<n>.tfrec, ...): the
+    validation ones go after MLE-bench's."""
+    from mlebench.registry import registry
+
+    k = len(list(registry.get_competition("cassava-leaf-disease-classification").public_dir.glob("test_tfrecords/*")))
+    _rename(sorted((pub / "test_tfrecords").glob("ld_test*.tfrec")),
+            lambda s: f"ld_test{int(s[7:9]) + k:02d}{s[9:]}")
+
+
+def _remap_speech(pub, priv, ans_rel, test_ids):
+    """prepare.py names test clips clip_<8-digit index>.wav: the validation clips go after MLE-bench's."""
+    n = 1 + max(int(i[5:13]) for i in test_ids)
+    stem = lambda s: f"clip_{int(s[5:]) + n:08d}"
+    for path in (pub / "sample_submission.csv", priv / ans_rel):
+        _map_csv(path, "fname", lambda v: stem(v[:-4]) + ".wav")
+    _rename(sorted((pub / "test" / "audio").glob("clip_*.wav")), stem)
+
+
 def _remap_text_norm(pub, priv, ans_rel, test_ids):
     n = 1 + max(int(i.split("_")[0]) for i in test_ids)
     f = lambda v: f"{int(v.split('_')[0]) + n}_{v.split('_', 1)[1]}"
@@ -312,7 +407,8 @@ def _remap_ventilator(pub, priv, ans_rel, test_ids):
 
 
 REMAPS = {"siim": _remap_siim, "plant": _remap_plant, "nomad": _remap_nomad, "dogs_vs_cats": _remap_dogs_vs_cats,
-          "text_norm": _remap_text_norm, "ventilator": _remap_ventilator}
+          "text_norm": _remap_text_norm, "ventilator": _remap_ventilator, "cassava": _remap_cassava,
+          "speech": _remap_speech}
 
 
 # ---------------------------------------------------------------------------------------------------- the split
@@ -337,7 +433,12 @@ def _link_instead_of_copy():
         return f
 
     shutil.copy, shutil.copyfile, shutil.copy2 = linker(copy), linker(copyfile), linker(copy2)
-    shutil.copytree = lambda src, dst, *a, **k: copytree(src, dst, *a, **{**k, "copy_function": shutil.copy2})
+    def linking_copytree(src, dst, *a, **k):
+        if len(a) < 3:  # copy_function not passed positionally (shutil's own recursion into subdirs does)
+            k["copy_function"] = shutil.copy2
+        return copytree(src, dst, *a, **k)
+
+    shutil.copytree = linking_copytree
     try:
         yield
     finally:
@@ -366,13 +467,13 @@ def _prepare_jigsaw(raw: Path, public: Path, private: Path) -> None:
 PREPARES = {"jigsaw": _prepare_jigsaw}
 
 
-def _strip_tfrecord_labels(pub: Path) -> None:
-    """siim: Kaggle's train TFRecords carry each image's `target`, and MLE-bench copies two of them into public/ as
-    the test records (tfrecords/test*.tfrec), labels included; so do the validation records. Rewrite every test
-    record without `target` (a new file: the hardlinked original in prepared/ is untouched)."""
+def _strip_tfrecord_labels(pub: Path, pattern: str = "tfrecords/test*.tfrec") -> None:
+    """siim, cassava: Kaggle's train TFRecords carry each image's `target`, and MLE-bench copies some of them into
+    public/ as the test records, labels included; so do the validation records. Rewrite every test record without
+    `target` (a new file: the hardlinked original in prepared/ is untouched)."""
     import tensorflow as tf
 
-    for p in sorted((pub / "tfrecords").glob("test*.tfrec")):
+    for p in sorted(pub.glob(pattern)):
         tmp = p.with_name(p.name + ".tmp")
         n = 0
         with tf.io.TFRecordWriter(str(tmp)) as w:
@@ -390,7 +491,8 @@ def _strip_tfrecord_labels(pub: Path) -> None:
         print(f"stripped target from {p.name} ({n} records)")
 
 
-POSTS = {"siim": _strip_tfrecord_labels}
+POSTS = {"siim": _strip_tfrecord_labels,
+         "cassava": lambda pub: _strip_tfrecord_labels(pub, "test_tfrecords/*.tfrec")}
 
 
 def _make_mlsp(comp, out: Path) -> Path:
@@ -447,6 +549,41 @@ def _make_mlsp(comp, out: Path) -> Path:
 CUSTOM = {"mlsp": _make_mlsp}
 
 
+def _load_answers(p: Path) -> pd.DataFrame:
+    """Answers as text: a CSV, or JSON lines (tensorflow2-qa; only the scalar fields are kept)."""
+    if p.suffix == ".jsonl":
+        rows = []
+        with open(p) as f:
+            for line in f:
+                r = json.loads(line)
+                rows.append({k: str(v) for k, v in r.items() if not isinstance(v, (list, dict))})
+        return pd.DataFrame(rows)
+    return pd.read_csv(p, dtype=str)
+
+
+def _empty_archive(p: Path) -> None:
+    if p.suffix == ".7z":
+        import py7zr
+
+        with py7zr.SevenZipFile(p, "w"):
+            pass
+    else:
+        with zipfile.ZipFile(p, "w"):
+            pass
+
+
+def _extract_member(archive: Path, member: str, dst: Path) -> None:
+    if archive.suffix == ".7z":
+        import py7zr
+
+        with tempfile.TemporaryDirectory(dir=dst.parent) as t, py7zr.SevenZipFile(archive) as s:
+            s.extract(t, targets=[member])
+            os.replace(Path(t) / member, dst)
+    else:
+        with zipfile.ZipFile(archive) as z, z.open(member) as src, open(dst, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+
 def _id_column(answers: pd.DataFrame, sample: Path) -> str:
     first = list(pd.read_csv(sample, nrows=0).columns)[0]
     return first if first in answers.columns else answers.columns[0]
@@ -469,8 +606,33 @@ def _check_no_leak(pub: Path, spec: Spec, val_ids: set[str], id_col: str) -> Non
                 hit = {Path(n).stem for n in z.namelist()} & val_ids
             if hit:
                 raise AssertionError(f"leak: {rel} holds validation files, e.g. {sorted(hit)[:3]}")
-        elif p.stem in _file_ids(val_ids, spec):
-            raise AssertionError(f"leak: train-side file {rel} is a validation row")
+        elif p.suffix in (".json", ".jsonl", ".7z"):
+            hit = _json_ids(p, id_col) & val_ids
+            if hit:
+                raise AssertionError(f"leak: {rel} holds {len(hit)} validation records, e.g. {sorted(hit)[:3]}")
+        if _has_id(rel, _file_ids(val_ids, spec)):
+            raise AssertionError(f"leak: train-side {rel} is (in) a validation row")
+
+
+def _json_ids(p: Path, id_col: str) -> set[str]:
+    """Values of the "<id_col>" key anywhere in a JSON / JSON-lines file (or the one file in a .7z), by text search:
+    the files are GBs of records, and only the id matters."""
+    import re
+
+    if p.suffix == ".7z":
+        import py7zr
+
+        with tempfile.TemporaryDirectory(dir=p.parent.parent) as t, py7zr.SevenZipFile(p) as s:
+            s.extractall(t)
+            return set().union(*(_json_ids(q, id_col) for q in Path(t).rglob("*") if q.is_file()))
+    pat = re.compile(rb'"' + re.escape(id_col.encode()) + rb'"\s*:\s*"?([^",}\s]+)')
+    ids: set[str] = set()
+    with open(p, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 26), b""):  # ids can straddle chunks: keep a tail
+            ids.update(m.decode() for m in pat.findall(chunk))
+            if len(chunk) == 1 << 26:
+                f.seek(-200, 1)
+    return ids
 
 
 def make(cid: str, force: bool = False) -> Path:
@@ -514,18 +676,29 @@ def make(cid: str, force: bool = False) -> Path:
                 for info in zi.infolist():
                     if not info.is_dir():
                         zo.writestr(prefix + info.filename, zi.read(info))
+        for name, members in spec.raw_extracted.items():
+            _empty_archive(raw / name)
+            for dst, src in members.items():
+                d = raw / dst
+                d.parent.mkdir(parents=True, exist_ok=True)
+                if ":" in src:
+                    _extract_member(pub0 / src.split(":")[0], src.split(":", 1)[1], d)
+                elif (pub0 / src).is_dir():
+                    d.symlink_to(pub0 / src, target_is_directory=True)
+                else:
+                    os.link(pub0 / src, d)
         with _link_instead_of_copy():
             # MLE-bench's own split, applied to MLE-bench's train
             (PREPARES[spec.prepare] if spec.prepare else comp.prepare_fn)(raw, pub_v, priv_v)
 
         ans_rel = comp.answers.relative_to(pub0.parent / "private")
-        test_ans = pd.read_csv(comp.answers, dtype=str)
+        test_ans = _load_answers(comp.answers)
         id_col = _id_column(test_ans, comp.sample_submission)  # text-normalization keeps its sample in private/
         test_ids = set(test_ans[id_col])
+        del test_ans  # tensorflow2-qa's answers hold whole documents
         if spec.remap:
             REMAPS[spec.remap](pub_v, priv_v, ans_rel, test_ids)
-        val_ans = pd.read_csv(priv_v / ans_rel, dtype=str)
-        val_ids = set(val_ans[id_col])
+        val_ids = set(_load_answers(priv_v / ans_rel)[id_col])
         clash = val_ids & test_ids
         if clash:
             raise AssertionError(f"{cid}: {len(clash)} validation ids equal MLE-bench test ids (renumbered by "
