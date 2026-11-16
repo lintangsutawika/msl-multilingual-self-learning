@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git curl sudo t
 # python3 would then shadow this image's Python (its exec server puts /usr/bin first on PATH) and lack mlebench/pandas.
 RUN ln -sf /usr/local/bin/python3 /usr/bin/python3 && ln -sf /usr/local/bin/python3 /usr/bin/python \
  && pip install --no-cache-dir asciinema
-# MLE-bench pinned to the repo's revision (as in src/benchmarks/mlebench/eval), without its declared dependencies:
+# MLE-bench pinned to the repo's revision (as in src/benchmarks/mlebench/prepare), without its declared dependencies:
 # they pull TensorFlow (GBs) that no grader uses. These are what its grading modules and the graders import.
 RUN pip install --no-cache-dir --no-deps "git+https://github.com/openai/mle-bench.git@{mlebench_rev}" \
  && pip install --no-cache-dir "pandas>=2.2,<3" numpy scipy scikit-learn tqdm diskcache tenacity pyyaml appdirs py7zr \
