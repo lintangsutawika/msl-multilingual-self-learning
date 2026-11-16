@@ -24,12 +24,22 @@
 #   TP_SIZE / DP_SIZE / CONTEXT_LENGTH   SGLang parallelism / context (default 1 / 1 / 262144)
 #   SGLANG_EXTRA_ARGS  extra SGLang flags (default: --tool-call-parser qwen3_coder)
 #   LATEST_FILE        the trainer run's LATEST pointer to hot-swap from (default: none)
-#   DISPATCH_TASKS     comma-separated mlebench-low tasks to run as real trials (default: none)
+#   DISPATCH_TASKS     comma-separated tasks to run as real trials, or "all" (every task in DISPATCH_TASKS_DIR)
+#                      (default: none)
 #   DISPATCH_MAX_CONCURRENT / MAX_ITERATIONS   dispatcher limits (default 2 / 200)
+#   DISPATCH_TRIAL_TIMEOUT   seconds before a trial is killed (default 14400; raise with MAX_ITERATIONS)
 #   DISPATCH_ROUNDS    passes over DISPATCH_TASKS (default 1; 0 = forever)
+#   DISPATCH_SHUFFLE   1 = shuffle the task order on every pass (default 0)
+#   AGENT_TIMEOUT_MULTIPLIER  harbor multiplier on the tasks' agent timeout (default 0 = harbor's 1;
+#                      run 14: 3 = 12h on 4h tasks); keep DISPATCH_TRIAL_TIMEOUT above the result
+#   TRIAL_MAX_SECONDS  >0: the budget note also shows the wall-clock time left (set = task timeout x multiplier)
+#   LLM_TIMEOUT        agent-side timeout of one model call, seconds (default 0 = the agent's 60)
 #   CONDENSER_MAX_EVENTS  agent summarizes older history past this many events (default 120; 0 = off)
 #   MAX_GEN_TOKENS     cap on tokens per model call, set by the forwarder (default 16384; 0 = no cap)
 #   TERMINAL_MAX_TIMEOUT  cap on how long one agent terminal action may block, seconds (default 1800; 0 = no cap)
+#   DISPATCH_TASKS_DIR task dirs of DISPATCH_TASKS (default harbor_tasks/mlebench-low; run 11+: mlebench-low-split)
+#   EPISODE_BUDGET     calls per episode shown to the agent after each tool output (default 0 = off;
+#                      match the trainer's SPOOL_EPISODE_BUDGET)
 set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-${PBS_O_WORKDIR:-$(cd "$(dirname "$0")/.." && pwd)}}"
 cd "$REPO_ROOT"
@@ -44,12 +54,15 @@ SPOOL_DIR="${SPOOL_DIR:-${RUN_DIR}/spool}"
 # CAPTURE=0: serving-only endpoint (e.g. for evaluation): nothing is recorded to the spool.
 CAPTURE="${CAPTURE:-1}"
 if [ "$CAPTURE" = 1 ]; then FWD_CAPTURE_DIR="$SPOOL_DIR"; else FWD_CAPTURE_DIR=""; fi
-LOG_DIR="${REPO_ROOT}/logs/rollout-${JOBTAG}"
+LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs/rollout-${JOBTAG}}"  # override to run two endpoints in one job
 PORT="${PORT:-30010}"
 MILES_SIF="${MILES_SIF:-/home/aci18914wh/mho-model-harness-optimization/miles.sif}"
 MODEL_PATH="${MODEL_PATH:-/home/aci18914wh/.cache/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/c202236235762e1c871ad0ccb60c8ee5ba337b9a}"
 RELAY_APP="${RELAY_APP:-msl-rollout-relay-${JOBTAG}}"
 MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-16384}"
+EPISODE_BUDGET="${EPISODE_BUDGET:-0}"
+TRIAL_MAX_STEPS="${TRIAL_MAX_STEPS:-0}"   # >0: the budget note also shows the agent steps left (set = MAX_ITERATIONS)
+TRIAL_MAX_SECONDS="${TRIAL_MAX_SECONDS:-0}"   # >0: the budget note also shows the time left (set = agent timeout)
 mkdir -p "$RUN_DIR" "$SPOOL_DIR" "$LOG_DIR"
 log() { echo "[rollout $(date +%H:%M:%S)] $*"; }
 log "job=${JOBTAG} run_dir=${RUN_DIR} model=${MODEL_PATH} port=${PORT}"
@@ -91,7 +104,12 @@ umask 022
 # Qwen3.5 agents need structured tool calls: qwen3_coder parser, and NO reasoning
 # parser (it swallows <tool_call> emitted before an omitted </think>; see configs/serve/Qwen).
 SGLANG_EXTRA_ARGS="${SGLANG_EXTRA_ARGS:---tool-call-parser qwen3_coder}"
-singularity exec --nv --writable-tmpfs --bind /home:/home --bind "${MSL_STORE}:${MSL_STORE}" "$MILES_SIF" \
+# ~/.cache/huggingface may be a symlink off /home (2026-11-10: moved to /groups for the /home
+# quota); the container only sees bound paths, so bind the cache's real location too.
+HF_CACHE_REAL="$(readlink -f "${HOME}/.cache/huggingface" 2>/dev/null || true)"
+HF_BIND=()
+case "$HF_CACHE_REAL" in /home/*|"") ;; *) HF_BIND=(--bind "${HF_CACHE_REAL}:${HF_CACHE_REAL}") ;; esac
+singularity exec --nv --writable-tmpfs --bind /home:/home --bind "${MSL_STORE}:${MSL_STORE}" "${HF_BIND[@]}" "$MILES_SIF" \
   python3 /sgl-workspace/sglang/python/sglang/launch_server.py \
   --model-path "$MODEL_PATH" --host 127.0.0.1 --port "$PORT" \
   --tp-size "${TP_SIZE:-1}" --dp-size "${DP_SIZE:-1}" --context-length "${CONTEXT_LENGTH:-262144}" \
@@ -118,7 +136,7 @@ log "relay deployed: ${RELAY_URL}"
 # 3. Forwarder: relay bridge + per-call capture into the shared spool.
 RELAY_WS_URL="wss://${RELAY_URL#https://}/bridge" RELAY_SECRET="$RELAY_SECRET" \
   VLLM_LOCAL_URL="http://127.0.0.1:${PORT}" BACKEND_API_KEY="$API_KEY" \
-  CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" \
+  CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" EPISODE_BUDGET="$EPISODE_BUDGET" TRIAL_MAX_STEPS="$TRIAL_MAX_STEPS" TRIAL_MAX_SECONDS="$TRIAL_MAX_SECONDS" \
   uv run --with websockets --with httpx python src/relay/node_forwarder.py > "${LOG_DIR}/forwarder.log" 2>&1 &
 FWD_PID=$!; PIDS+=("$FWD_PID")
 
@@ -151,16 +169,19 @@ start_watcher() {
   WATCH_PID=$!; PIDS+=("$WATCH_PID")
 }
 WATCH_PID=""
+DISP_PID=""
 if [ -n "${LATEST_FILE:-}" ]; then start_watcher; log "weight watcher on ${LATEST_FILE}"; fi
 
 # 5. Dispatcher (optional): DISPATCH_TASKS=task1,task2 runs real MLE-Bench trials
 #    (stock openhands-sdk on SAIL) against this job's relay; logs in RUN_DIR/dispatch_logs.
 if [ -n "${DISPATCH_TASKS:-}" ]; then
-  .venv/bin/python src/rollout/dispatch.py --run-dir "$RUN_DIR" --tasks "$DISPATCH_TASKS" \
-    --max-concurrent "${DISPATCH_MAX_CONCURRENT:-2}" --max-iterations "${MAX_ITERATIONS:-200}" \
-    --rounds "${DISPATCH_ROUNDS:-1}" --condenser-max-events "${CONDENSER_MAX_EVENTS:-120}" --terminal-max-timeout "${TERMINAL_MAX_TIMEOUT:-1800}" \
+  .venv/bin/python src/rollout/dispatch.py --run-dir "$RUN_DIR" --tasks "$DISPATCH_TASKS" --tasks-dir "${DISPATCH_TASKS_DIR:-harbor_tasks/mlebench-low}" \
+    --max-concurrent "${DISPATCH_MAX_CONCURRENT:-2}" --max-iterations "${MAX_ITERATIONS:-200}" --trial-timeout "${DISPATCH_TRIAL_TIMEOUT:-14400}" \
+    --rounds "${DISPATCH_ROUNDS:-1}" --stop-after-validates "${DISPATCH_STOP_AFTER_VALIDATES:-0}" --condenser-max-events "${CONDENSER_MAX_EVENTS:-120}" --terminal-max-timeout "${TERMINAL_MAX_TIMEOUT:-1800}" \
+    --agent-timeout-multiplier "${AGENT_TIMEOUT_MULTIPLIER:-0}" --llm-timeout "${LLM_TIMEOUT:-0}" \
+    $( [ "${DISPATCH_SHUFFLE:-0}" = 1 ] && echo --shuffle ) $( [ -n "${SEED:-}" ] && echo --seed "$SEED" ) \
     > "${LOG_DIR}/dispatch.log" 2>&1 &
-  PIDS+=("$!")
+  DISP_PID=$!; PIDS+=("$DISP_PID")
   log "dispatcher started for ${DISPATCH_TASKS}"
 fi
 
@@ -168,11 +189,16 @@ fi
 log "running"
 while true; do
   kill -0 "$SGLANG_PID" 2>/dev/null || { log "sglang exited"; tail -30 "${LOG_DIR}/sglang.log"; exit 1; }
+  # A fixed number of rounds (evals) ends the job once the dispatcher has finished every trial;
+  # DISPATCH_ROUNDS=0 (training) keeps serving. Before this, finished evals held their node to walltime.
+  if [ -n "$DISP_PID" ] && [ "${DISPATCH_ROUNDS:-1}" != 0 ] && ! kill -0 "$DISP_PID" 2>/dev/null; then
+    log "dispatcher finished (DISPATCH_ROUNDS=${DISPATCH_ROUNDS:-1}); ending job"; exit 0
+  fi
   if ! kill -0 "$FWD_PID" 2>/dev/null; then
     log "forwarder exited; restarting"
     RELAY_WS_URL="wss://${RELAY_URL#https://}/bridge" RELAY_SECRET="$RELAY_SECRET" \
       VLLM_LOCAL_URL="http://127.0.0.1:${PORT}" BACKEND_API_KEY="$API_KEY" \
-      CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" \
+      CAPTURE_DIR="$FWD_CAPTURE_DIR" WEIGHT_VERSION_FILE="${RUN_DIR}/weight_version" MAX_GEN_TOKENS="$MAX_GEN_TOKENS" EPISODE_BUDGET="$EPISODE_BUDGET" TRIAL_MAX_STEPS="$TRIAL_MAX_STEPS" TRIAL_MAX_SECONDS="$TRIAL_MAX_SECONDS" \
       uv run --with websockets --with httpx python src/relay/node_forwarder.py >> "${LOG_DIR}/forwarder.log" 2>&1 &
     FWD_PID=$!; PIDS+=("$FWD_PID")
   fi
