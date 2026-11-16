@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# validate <file.csv> — grade a MLE-Bench submission against the held-out answers.
+# The answers and the grader are root-only; this hands the file to the grader via sudo.
+if [ "$#" -ne 1 ]; then
+  echo "usage: validate <file.csv>" >&2
+  exit 2
+fi
+f="$(realpath -e -- "$1" 2>/dev/null)" || { echo "validate: no such file: $1" >&2; exit 2; }
+# Sandboxes have no hosts entry for their hostname; drop sudo's harmless warning about it.
+exec sudo -n /usr/local/bin/validate-root "$f" 2> >(grep -v --line-buffered 'unable to resolve host' >&2)

@@ -27,6 +27,11 @@ model:
     timeout: 1200
     temperature: 0.6
     top_p: 0.95
+    # Explicit reasoning_effort: litellm defaults this thinking-capable Qwen to
+    # 'high', but the served vLLM maps reasoning effort to 'xhigh'/'medium'/'low'
+    # and rejects 'high' (BadRequestError: Unexpected reasoning effort high).
+    # Pin .xhigh. (max reasoning) so requests are accepted.
+    reasoning_effort: xhigh
     drop_params: true
     extra_body:
       top_k: 20
