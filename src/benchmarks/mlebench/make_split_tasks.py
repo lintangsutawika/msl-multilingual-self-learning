@@ -4,10 +4,12 @@ In the tasks the adapter generates, `validate` grades the full private test set:
 In a split copy, `validate` grades a validation set carved out of MLE-bench's *train* with the competition's own
 prepare.py (valsplit.py), and the final grade is MLE-bench's, on MLE-bench's untouched test set:
 
-  * environment/public/      replaced by the split's public data: train' (train minus the validation rows), and the
+  * environment/public/      (or, for tasks built with --mount-data, the mounted public_data in task.toml)
+                             replaced by the split's public data: train' (train minus the validation rows), and the
                              test inputs with the validation inputs shuffled in (both come from Kaggle's train, so
                              they can't be told apart). The agent writes one predictions.csv covering all of them.
-  * environment/private_val/ the validation answers (root-only, like private/). private/ is unchanged.
+  * environment/private_val/ the validation answers (root-only, like private/); with --mount-data they stay on the
+                             host instead (task.toml val_answers, graded by validate_host.py). private/ is unchanged.
   * validate.py, validate_server.py  grade only the validation rows (grade_subset.py, copied to /opt/msl).
   * tests/test.sh            grades only MLE-bench's test rows, so the score and medal are MLE-bench's.
   * instruction.md           describes the validation set.
@@ -22,6 +24,7 @@ task sets with the same keys. Run it in the eval environment (it reads the split
 (The earlier split, halving the test rows by id hash, is split_grade.py; it is kept for the MLE-Dojo tasks.)
 """
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -74,7 +77,7 @@ TEST_SUBSET = '''# Validation split (make_split_tasks.py): predictions.csv also 
 # test rows, so the score and medal are MLE-bench's.
 if [ -f "$SUBMISSION" ]; then
     python3 -c "import sys; sys.path.insert(0, '/opt/msl'); from grade_subset import subset_csv; subset_csv(*sys.argv[1:])" \\
-        "$SUBMISSION" "$COMPETITION" /workspace/private "$WORKDIR/predictions.csv"
+        "$SUBMISSION" "$COMPETITION" "$PRIVATE" "$WORKDIR/predictions.csv"
     SUBMISSION="$WORKDIR/predictions.csv"
 fi
 printf '{"competition_id"'''
@@ -118,15 +121,27 @@ def make(task: str, src: Path, dst: Path) -> Path:
     # environment/public is replaced by the split's public data: don't copy MLE-bench's first
     shutil.copytree(src / task, out, ignore=lambda d, names: ["__pycache__"] + (["public"] if d.endswith("/environment") else []))
     env = out / "environment"
-    shutil.copytree(vs / "public", env / "public", copy_function=_link_or_copy)
-    shutil.copytree(vs / "private_val", env / "private_val")
-    shutil.copy(vs / "valsplit.json", env / "private_val" / "valsplit.json")
+    toml = out / "task.toml"
+    mounted = "\npublic_data = " in toml.read_text()  # built with --mount-data (Babel)
+    if mounted:
+        # Mount the split's public data instead of MLE-bench's; the validation answers stay on the host, graded by
+        # validate_host.py (run_babel.sh starts it when task.toml names val_answers).
+        text = toml.read_text()
+        old = next(l for l in text.splitlines() if l.startswith("public_data = "))
+        new = (f"public_data = {json.dumps(str((vs / 'public').resolve()))}  # bind-mount at /workspace/public\n"
+               f"val_answers = {json.dumps(str((vs / 'private_val').resolve()))}  # graded on the host (validate_host.py)")
+        toml.write_text(text.replace(old, new, 1))
+    else:
+        shutil.copytree(vs / "public", env / "public", copy_function=_link_or_copy)
+        shutil.copytree(vs / "private_val", env / "private_val")
+        shutil.copy(vs / "valsplit.json", env / "private_val" / "valsplit.json")
     shutil.copy(HERE / "grade_subset.py", env / "grade_subset.py")
     df = env / "Dockerfile"
     _patch(df, "COPY validate.py /opt/msl/validate.py\n",
            "COPY validate.py /opt/msl/validate.py\nCOPY grade_subset.py /opt/msl/grade_subset.py\n")
-    _patch(df, "COPY private/ /workspace/private/\n",
-           "COPY private/ /workspace/private/\nCOPY private_val/ /workspace/private_val/\n")
+    if not mounted:
+        _patch(df, "COPY private/ /workspace/private/\n",
+               "COPY private/ /workspace/private/\nCOPY private_val/ /workspace/private_val/\n")
     _patch(df, "chmod 600 /etc/msl/score_key /opt/msl/validate.py",
            "chmod 600 /etc/msl/score_key /opt/msl/validate.py /opt/msl/grade_subset.py")
     _patch(df, "for p in /workspace/private /workspace/leaderboard.csv",

@@ -6,5 +6,23 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 f="$(realpath -e -- "$1" 2>/dev/null)" || { echo "validate: no such file: $1" >&2; exit 2; }
+# Babel (run_babel.sh): the validation answers and the signing key stay on the host; send the file to its grader.
+if [ -f /etc/msl-validate/endpoint ]; then
+  read -r url token < /etc/msl-validate/endpoint
+  out=$(curl -sS --max-time 3600 -H "X-Token: $token" -H "X-Name: $f" -H "Content-Type: text/csv" -H "Expect:" \
+        -X POST -T "$f" -w '\n%{http_code}' "$url") || { echo "validate: grader unreachable" >&2; exit 1; }
+  exec /usr/local/bin/python3 -I -c '
+import json, os, sys
+body, code = sys.argv[1].rsplit("\n", 1)
+r = json.loads(body or "{}")
+if code != "200":
+    sys.exit("validate: " + r.get("error", "HTTP " + code))
+os.makedirs("/logs/verifier", exist_ok=True)
+with open("/logs/verifier/validation_scores.jsonl", "a") as f:
+    f.write(json.dumps({"submission_path": sys.argv[2], "submission_score": float(r["score"])}) + "\n")
+print("score=%s sig=%s" % (r["score"], r["sig"]))' "$out" "$f"
+fi
 # Sandboxes have no hosts entry for their hostname; drop sudo's harmless warning about it.
+# Rootless Singularity (no setuid sudo, no real uid separation): call the grader directly.
+if ! sudo -n true 2>/dev/null; then exec /usr/local/bin/validate-root "$f"; fi
 exec sudo -n /usr/local/bin/validate-root "$f" 2> >(grep -v --line-buffered 'unable to resolve host' >&2)

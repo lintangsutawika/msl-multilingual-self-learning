@@ -8,24 +8,29 @@
 # This is the end-of-trial evaluation only; the PPO training reward comes from the
 # signed `validate` scores recorded in the rollout spool.
 set -euo pipefail
+export PATH=/usr/local/bin:$PATH  # the image's Python (with mlebench), not a system one
 SUBMISSION="/workspace/predictions.csv"
 COMPETITION="{comp_id}"
 mkdir -p /logs/verifier
 # Neutralize Kaggle's interactive rule-acceptance prompts (harmless no-op).
 python3 /opt/msl/neutralize_rules.py
-# Data is BAKED into the image; place it where mlebench grade reads it (no Kaggle).
-python3 - "$COMPETITION" <<'PY'
-import pathlib, shutil, sys
+# Test answers and leaderboard: baked into /workspace, or in tests/ (tasks built with --mount-data; uploaded only now).
+PRIVATE=/workspace/private; LEADERBOARD=/workspace/leaderboard.csv
+[ -d /tests/private ] && PRIVATE=/tests/private
+[ -f /tests/leaderboard.csv ] && LEADERBOARD=/tests/leaderboard.csv
+# Place them where mlebench grade reads them (no Kaggle). Grading needs only the answers, not the public data.
+python3 - "$COMPETITION" "$PRIVATE" "$LEADERBOARD" <<'PY'
+import shutil, sys
 from mlebench.registry import registry
 comp = registry.get_competition(sys.argv[1])
-for src, dst in (("/workspace/private", comp.private_dir), ("/workspace/public", comp.public_dir)):
-    if pathlib.Path(src).exists():
-        shutil.copytree(src, dst, dirs_exist_ok=True)
+shutil.copytree(sys.argv[2], comp.private_dir, dirs_exist_ok=True)
 comp.leaderboard.parent.mkdir(parents=True, exist_ok=True)
-shutil.copy("/workspace/leaderboard.csv", comp.leaderboard)
+shutil.copy(sys.argv[3], comp.leaderboard)
 PY
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
+# Keep the agent's final predictions (gzipped) next to the grade, so a grading fix can regrade without rerunning.
+[ -f "$SUBMISSION" ] && gzip -c "$SUBMISSION" > /logs/verifier/predictions.csv.gz || true
 printf '{"competition_id":"%s","submission_path":"%s"}\n' "$COMPETITION" "$SUBMISSION" > "$WORKDIR/subs.jsonl"
 mlebench grade --submission "$WORKDIR/subs.jsonl" --output-dir "$WORKDIR/out" >"$WORKDIR/grade.log" 2>&1 || true
 python3 - "$WORKDIR" <<'PY'

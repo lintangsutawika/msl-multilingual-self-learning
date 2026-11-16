@@ -77,11 +77,14 @@ def main() -> None:
                     help="download + prepare missing competition data first (needs Kaggle credentials)")
     ap.add_argument("--output", default=str(DEFAULT_OUTPUT),
                     help="output dir (default harbor_tasks); written under mlebench-<split>/ subdirs")
+    ap.add_argument("--mount-data", action="store_true",
+                    help="Babel / Singularity: don't copy the data into the task; the public data is bind-mounted "
+                         "read-only at run time (run_babel.sh) and the test answers go to tests/")
     args = ap.parse_args()
 
     output = Path(args.output)
     targets = _resolve_targets(args)
-    made, failed = generate_all(targets, output, prepare_data=args.prepare)
+    made, failed = generate_all(targets, output, prepare_data=args.prepare, mount_data=args.mount_data)
 
     for cid, diff, d in made:
         print(f"generated {diff:6s} {cid} -> {d}")
