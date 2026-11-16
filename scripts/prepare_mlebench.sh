@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Download MLE-bench competition data into MLE-bench's data dir. Download only: building tasks from it is
-# src/benchmarks/mlebench/tasks.sh.
+# scripts/mlebench_tasks.sh.
 #
 #   scripts/prepare_mlebench.sh lite                    # every competition of a set (a folder on the Drive)
 #   scripts/prepare_mlebench.sh lite spooky-author-identification leaf-classification   # some of them
