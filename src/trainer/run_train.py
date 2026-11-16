@@ -89,7 +89,12 @@ def execute(args: ScriptArgs):
     # and wrote all-zero weights (2026-11-03). Only an explicit --no-offload-train disables it.
     # Opt back in with OFFLOAD_TRAIN=1.
     offload = "--offload-train " if os.environ.get("OFFLOAD_TRAIN") == "1" else "--no-offload-train "
-    ppo_args = ("--advantage-estimator ppo --critic-load %s %s--use-rollout-logprobs --use-kl-loss --kl-loss-coef 0.01 --kl-loss-type low_var_kl --entropy-coef 0.0 --eps-clip 0.2 --eps-clip-high 0.28 " % (critic_load, offload))
+    # USE_TIS=1: PPO ratio against the trainer's own old log-probs (Megatron forward pass) plus a truncated
+    # importance weight min(pi_old_train / pi_rollout, TIS_CLIP) for the engine mismatch + staleness
+    # (Yao et al., off-policy RL note). Default: --use-rollout-logprobs (ratio against the rollout's log-probs).
+    lp_args = ("--use-tis --tis-clip %s --tis-clip-low %s " % (os.environ.get("TIS_CLIP", "2.0"), os.environ.get("TIS_CLIP_LOW", "0"))
+               if os.environ.get("USE_TIS") == "1" else "--use-rollout-logprobs ")
+    ppo_args = ("--advantage-estimator ppo --critic-load %s %s" % (critic_load, offload) + lp_args + "--use-kl-loss --kl-loss-coef %s --kl-loss-type low_var_kl --entropy-coef 0.0 --eps-clip 0.2 --eps-clip-high 0.28 " % (os.environ.get("KL_COEF", "0.01"),))
     optimizer_args = ("--optimizer adam --lr %s " % os.environ.get("LR", "1e-6") + "--lr-decay-style constant --weight-decay 0.1 --adam-beta1 0.9 --adam-beta2 0.98 ")
     if os.environ.get("ONLINE_MODE"):
         # Online: the trainer never generates. The rollout fn reads closed episodes that the rollout job's
@@ -117,9 +122,11 @@ def execute(args: ScriptArgs):
         key = args.wandb_key or os.environ.get("WANDB_API_KEY", "")
         if key:
             wandb_args += "--wandb-key %s " % key
-    train_args = ckpt_args + perf_args + ppo_args + optimizer_args + ingest_args + misc_args + wandb_args
+    # SEED (env): Megatron/MILES --seed; unset keeps MILES' default (1234)
+    seed_args = ("--seed %s " % os.environ["SEED"]) if os.environ.get("SEED") else ""
+    train_args = ckpt_args + perf_args + ppo_args + optimizer_args + ingest_args + misc_args + wandb_args + seed_args
     _msl_src = str(Path(__file__).resolve().parent)
-    extra_env_vars = {"PYTHONPATH": ":".join([_msl_src, args.megatron_path, *agentic_pythonpath_dirs(), str(U.repo_base_dir)]), **harbor_env_vars(args), "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"), "EPISODE_CHECKER_MODULE": "src.episode.mlebench", **{k: v for k, v in os.environ.items() if k.startswith("SPOOL_") or k in ("METRIC_DIRECTIONS", "HF_BASE_DIR", "KEEP_HF", "KEEP_CKPT")}}
+    extra_env_vars = {"PYTHONPATH": ":".join([_msl_src, args.megatron_path, *agentic_pythonpath_dirs(), str(U.repo_base_dir)]), **harbor_env_vars(args), "PYTORCH_CUDA_ALLOC_CONF": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True"), "EPISODE_CHECKER_MODULE": "src.episode.mlebench", **{k: v for k, v in os.environ.items() if k.startswith("SPOOL_") or k in ("METRIC_DIRECTIONS", "HF_BASE_DIR", "KEEP_HF", "KEEP_HF_EVERY", "KEEP_CKPT")}}
     U.execute_train(train_args=train_args, config=args, num_gpus_per_node=args.num_gpus_per_node, megatron_model_type=args.megatron_model_type, megatron_path=args.megatron_path, extra_env_vars=extra_env_vars, train_script="train_async.py")
 
 @U.dataclass_cli

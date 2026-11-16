@@ -42,11 +42,16 @@ NODE_IP="$(hostname -i 2>/dev/null | awk '{print $1}')"; NODE_IP="${NODE_IP:-127
 export MASTER_ADDR="$NODE_IP" TMPDIR="$LOCAL" RAY_TMPDIR="$RAY_TMP"
 export RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE=1 RAY_object_store_memory=5368709120 RAY_raylet_startup_timeout=300
 echo "[trainer] start $(date) run=$RUN_NAME save=$SAVE spool=$SPOOL_DIR node_ip=$NODE_IP" > "$PROG"
+# ~/.cache/huggingface may be a symlink off /home (2026-11-10: moved to /groups for the /home
+# quota); the container only sees bound paths, so bind the cache's real location too.
+HF_CACHE_REAL="$(readlink -f "${HOME}/.cache/huggingface" 2>/dev/null || true)"
+HF_BIND=()
+case "$HF_CACHE_REAL" in /home/*|"") ;; *) HF_BIND=(--bind "${HF_CACHE_REAL}:${HF_CACHE_REAL}") ;; esac
 run_trainer() {
   singularity exec --nv --writable-tmpfs --ipc \
     --bind "${REPO_ROOT}/src:/mnt/msl_src" \
     --bind "${REPO_ROOT}/src/trainer/run_train.py:/root/miles/examples/experimental/harbor/run.py" \
-    --bind "${MSL_ROOT}:${MSL_ROOT}" \
+    --bind "${MSL_ROOT}:${MSL_ROOT}" "${HF_BIND[@]}" \
     --env "MSL_REPO=${REPO_ROOT}" --env "MSL_BASE=${MSL_ROOT}/base" \
     --env "NUM_GPUS=8" --env "CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7" \
     --env "ONLINE_MODE=1" --env "SPOOL_DIR=${SPOOL_DIR}" --env "NUM_ROLLOUT=${NUM_ROLLOUT}" \
@@ -54,8 +59,8 @@ run_trainer() {
     --env "DYNAMIC_BATCH=${DYNAMIC_BATCH:-1}" --env "ROLLOUT_BATCH_SIZE=${ROLLOUT_BATCH_SIZE:-16}" --env "LR=${LR:-1e-6}" \
     --env "SPOOL_MAX_TOKENS=${SPOOL_MAX_TOKENS:-160000}" --env "SPOOL_MAX_STALENESS=${SPOOL_MAX_STALENESS:-10}" ${SPOOL_SORT:+--env "SPOOL_SORT=${SPOOL_SORT}"} ${SPOOL_STATE:+--env "SPOOL_STATE=${SPOOL_STATE}"} \
     --env "METRIC_DIRECTIONS=${METRIC_DIRECTIONS:-${MSL_ROOT}/base/metric_directions.json}" \
-    --env "HF_BASE_DIR=${HF_BASE_DIR}" --env "KEEP_HF=${KEEP_HF:-3}" --env "KEEP_CKPT=${KEEP_CKPT:-1}" \
-    --env "MODEL=Qwen/Qwen3.5-9B" --env "RESUME=${RESUME:-1}" \
+    --env "HF_BASE_DIR=${HF_BASE_DIR}" --env "KEEP_HF=${KEEP_HF:-3}" --env "KEEP_HF_EVERY=${KEEP_HF_EVERY:-20}" --env "KEEP_CKPT=${KEEP_CKPT:-1}" \
+    --env "MODEL=Qwen/Qwen3.5-9B" --env "RESUME=${RESUME:-1}" --env "KL_COEF=${KL_COEF:-0.01}" ${SEED:+--env "SEED=${SEED}"} ${USE_TIS:+--env "USE_TIS=${USE_TIS}"} ${TIS_CLIP:+--env "TIS_CLIP=${TIS_CLIP}"} \
     --env "MASTER_ADDR=${NODE_IP}" --env "TMPDIR=${LOCAL}" --env "RAY_TMPDIR=${RAY_TMP}" \
     --env "RAY_OBJECT_STORE_ALLOW_SLOW_STORAGE=1" --env "RAY_object_store_memory=5368709120" --env "RAY_raylet_startup_timeout=300" \
     "${MILES_SIF}" bash -c "set -euo pipefail

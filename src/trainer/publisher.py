@@ -9,7 +9,8 @@ with ``hf_checkpoint_dir=None``). For the actor it
   2. atomically replaces ``<run>/LATEST`` with {"version": N, "path": ...},
      which the rollout job's weight watcher polls (version 0 = the base model; versions
      keep increasing across trainer restarts);
-  3. prunes old HF exports, keeping the newest KEEP_HF (and never the one LATEST names).
+  3. prunes old HF exports, keeping the newest KEEP_HF (and never the one LATEST names),
+     plus every KEEP_HF_EVERY-th version as a rollback point.
 
 For both roles it prunes old Megatron ``iter_*`` dirs, keeping the newest KEEP_CKPT
 (an actor + critic save is ~260 GB).
@@ -17,6 +18,9 @@ For both roles it prunes old Megatron ``iter_*`` dirs, keeping the newest KEEP_C
 Env:
     HF_BASE_DIR   base HF snapshot to copy non-weight files from (required)
     KEEP_HF       HF exports to keep (default 3)
+    KEEP_HF_EVERY also keep every export whose version is a multiple of this (default 20; 0 = off):
+                  rollback points to branch a new run from (run 8's last healthy weights,
+                  ~step 60, were pruned before its collapse at step 70 was noticed)
     KEEP_CKPT     Megatron checkpoints to keep per role (default 1)
 """
 from __future__ import annotations
@@ -54,6 +58,19 @@ def _prune(dirs: list[Path], keep: int, protect: set[Path]) -> None:
             _log(f"pruned {d}")
 
 
+def _rollback_points(dirs: list[Path]) -> set[Path]:
+    every = int(os.environ.get("KEEP_HF_EVERY", "20"))
+    keep = set()
+    for d in dirs:
+        try:
+            version = int(d.name.removeprefix("step_")) + 1  # step_{rollout_id} holds version rollout_id + 1
+        except ValueError:
+            continue
+        if every and version % every == 0:
+            keep.add(d.resolve())
+    return keep
+
+
 def post_save(args, rollout_id: int, checkpoint_dir, hf_checkpoint_dir) -> None:
     ckpt = Path(checkpoint_dir)
     _prune([d for d in ckpt.parent.glob("iter_*") if d != ckpt], int(os.environ.get("KEEP_CKPT", "1")) - 1, set())
@@ -74,4 +91,6 @@ def post_save(args, rollout_id: int, checkpoint_dir, hf_checkpoint_dir) -> None:
     version = max(rollout_id + 1, prev + 1)
     _publish(run_dir, version, hf)
     _log(f"published v{version} -> {hf}")
-    _prune([d for d in hf.parent.glob("step_*") if d != hf], int(os.environ.get("KEEP_HF", "3")) - 1, {hf.resolve()})
+    old = [d for d in hf.parent.glob("step_*") if d != hf]
+    protect = _rollback_points(old)
+    _prune([d for d in old if d.resolve() not in protect], int(os.environ.get("KEEP_HF", "3")) - 1, {hf.resolve()})
