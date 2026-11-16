@@ -1,0 +1,45 @@
+#!/bin/bash
+# sciexam_trial.qsub — SciExam-ENSO trial run (CPU node): one oracle trial, then the models'
+# trials through src/rollout/dispatch.py against the dedicated servers of sciexam_serve.qsub.
+#
+#   qsub -N sx-trial -j oe -o logs/ -P gai51740 -q R9920261300 -v RTYPE=rt_HC,KINDS=glimmer:meta/muse-glimmer-30b,... \
+#     -l select=1 -l walltime=36:00:00 scripts/eval/sciexam_trial.qsub
+# KINDS=<kind>:<served model name>,...  ROUNDS (default 2)  ORACLE=1|0
+set -euo pipefail
+MSL=/home/aci18914wh/msl-multilingual-self-learning
+cd "$MSL"; umask 022
+MSL_STORE="${MSL_STORE:-/groups/gai51740/aci18914wh/msl/runs}"
+KINDS="${KINDS:-glimmer:meta/muse-glimmer-30b,dsv4:azure_ai/DeepSeek-V4-Flash-0731,dsv41:azure_ai/DeepSeek-V4.1-Flash-1017}"
+TASKS_DIR=harbor_tasks/sciexam; TASK=sciexam-enso
+log(){ echo "[sciexam-trial $(date +%H:%M:%S)] $*"; }
+PIDS=()
+trap 'for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null || true; done; wait' EXIT TERM INT
+
+if [ "${ORACLE:-1}" = "1" ]; then
+  O="$MSL_STORE/sciexam-oracle"; mkdir -p "$O"
+  ( set -a; . ./.env; set +a; export SAIL_API_KEY="${SAIL_API_KEY:-${SAIL_KEY:-}}"
+    timeout 7200 .venv/bin/harbor run -p "$TASKS_DIR/$TASK" -a oracle -e sail.harbor:SailboxEnvironment \
+      -n 1 --job-name "oracle-$(date +%m%d%H%M%S)" -o "$O/trials" -y > "$O/oracle.log" 2>&1 ) &
+  PIDS+=($!); log "oracle -> $O/oracle.log"
+fi
+
+ready() {  # ready <run dir> <model>: the model answers through its relay
+  local ep="$1/endpoint.env" url key
+  [ -s "$ep" ] || return 1
+  url="$(sed -n 's/^RELAY_URL=//p' "$ep")"; key="$(sed -n 's/^RELAY_SECRET=//p' "$ep")"
+  curl -sf -m 30 -H "Authorization: Bearer $key" "$url/v1/models" 2>/dev/null | grep -q "\"$2\""
+}
+
+for pair in ${KINDS//,/ }; do
+  kind="${pair%%:*}"; model="${pair#*:}"; run="$MSL_STORE/sciexam-$kind"
+  (
+    until ready "$run" "$model"; do sleep 60; done
+    log "$kind ready ($model)"
+    .venv/bin/python src/rollout/dispatch.py --run-dir "$run" --tasks-dir "$TASKS_DIR" --tasks "$TASK" \
+      --model "$model" --rounds "${ROUNDS:-2}" --max-concurrent "${ROUNDS:-2}" \
+      --max-iterations "${MAX_ITERATIONS:-2000}" --trial-timeout "${TRIAL_TIMEOUT:-27000}" \
+      --condenser-max-events "${CONDENSER_MAX_EVENTS:-120}" --terminal-max-timeout "${TERMINAL_MAX_TIMEOUT:-1800}"
+  ) > "$run.dispatch.log" 2>&1 &
+  PIDS+=($!); log "$kind -> $run.dispatch.log"
+done
+wait

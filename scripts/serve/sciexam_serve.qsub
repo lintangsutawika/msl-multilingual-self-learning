@@ -1,0 +1,61 @@
+#!/bin/bash
+# sciexam_serve.qsub — dedicated model server for SciExam-ENSO trial runs (not shared with TSA):
+# vLLM on this node, exposed through its own Modal relay app with its own secret, written as an
+# MSL endpoint.env so src/rollout/dispatch.py can drive trials against it.
+#
+#   MODEL_KIND=glimmer|dsv4|dsv41  (Muse-Glimmer-30B / DeepSeek-V4-Flash-0731 / DeepSeek-V4.1-Flash-1017)
+#   qsub -N sx-<kind> -j oe -o logs/ -P gai51740 -q R9920261300 -v RTYPE=rt_HF,MODEL_KIND=<kind>  (glimmer: RTYPE=rt_HG, 1 GPU) \
+#     -l select=1 -l walltime=24:00:00 scripts/serve/sciexam_serve.qsub
+#
+# Run dir: $MSL_STORE/sciexam-<kind>/endpoint.env (RELAY_URL, RELAY_SECRET, mode 600; the secret is
+# made once per run dir and reused on restart). Relay app: msl-sciexam-<kind>-relay. Flags and
+# weights are the TSA serve recipes (paper2rlenv/serve/*.json), read only.
+set -euo pipefail
+MSL=/home/aci18914wh/msl-multilingual-self-learning
+P2R_SERVE=../tsa-terminal-science-agent/paper2rlenv/serve
+MSL_STORE="${MSL_STORE:-/groups/gai51740/aci18914wh/msl/runs}"
+KIND="${MODEL_KIND:?MODEL_KIND=glimmer|dsv4|dsv41}"
+RUN="$MSL_STORE/sciexam-$KIND"
+APP="msl-sciexam-$KIND-relay"
+export RELAY_REQUEST_TIMEOUT=3600
+export PATH=/home/aci18914wh/.local/bin:$PATH
+export HF_HUB_OFFLINE=1
+log(){ echo "[sciexam-serve $KIND $(date +%H:%M:%S)] $*"; }
+
+case "$KIND" in
+  glimmer)
+    MODEL=meta-models/Muse-Glimmer-30B; CONF=muse-glimmer-30b.json
+    SIF=/home/aci18914wh/vllm-openai:v0.28.0.sif; TP=1; DP="${DATA_PARALLEL:-1}"
+    SRC=/home/aci18914wh/tts-tokens-that-suffice/hf_cache/hub/models--meta-models--Muse-Glimmer-30B
+    CACHE_DIR="${PBS_LOCALDIR:-/tmp}/.cache"; mkdir -p "$CACHE_DIR/huggingface/hub" "$CACHE_DIR/tmp"
+    log "staging weights"; cp -a "$SRC" "$CACHE_DIR/huggingface/hub/" ;;
+  dsv4)
+    MODEL=deepseek-ai/DeepSeek-V4-Flash-0731; CONF=deepseek-v4-flash-0731.json
+    SIF=/home/aci18914wh/vllm-openai_v0.32.0-cu129.sif; TP=8; DP=1
+    CACHE_DIR=/groups/gai51740/aci18914wh/tsa/cache ;;
+  dsv41)
+    MODEL=deepseek-ai/DeepSeek-V4.1-Flash-1017; CONF=deepseek-v41-flash-1017.json
+    SIF=/home/aci18914wh/vllm-openai_v0.32.0-cu129.sif; TP=8; DP=1
+    CACHE_DIR=/groups/gai51740/aci18914wh/tsa/cache
+    export VLLM_ENGINE_READY_TIMEOUT_S=7200 ;;
+  *) log "unknown MODEL_KIND"; exit 2 ;;
+esac
+
+umask 077
+mkdir -p "$RUN"
+KEY="$(sed -n "s/^RELAY_SECRET=//p" "$RUN/endpoint.env" 2>/dev/null || true)"
+[ -n "$KEY" ] || KEY="$(openssl rand -hex 24)"
+
+cd "$MSL"
+OUT="$(RELAY_APP_NAME="$APP" RELAY_SECRET="$KEY" uv run modal deploy src/relay/public_api.py 2>&1)" || { echo "$OUT" | grep -v -i secret; exit 2; }
+URL="$(printf "%s" "$OUT" | grep -oE "https://[a-zA-Z0-9._-]+\.modal\.run" | head -1)"
+[ -n "$URL" ] || { log "no relay URL"; exit 2; }
+printf "RELAY_URL=%s\nRELAY_SECRET=%s\nSERVE_JOB=%s\nMODEL=%s\n" "$URL" "$KEY" "${PBS_JOBID:-}" "$MODEL" > "$RUN/endpoint.env"
+log "relay $URL (endpoint -> $RUN/endpoint.env)"
+umask 027
+
+MODEL="$MODEL" SERVE_CONFIG="$P2R_SERVE/$CONF" VLLM_CUDA_SIF="$SIF" \
+TENSOR_PARALLEL="$TP" DATA_PARALLEL="$DP" GPU_MEM_UTIL=0.90 PORT=8000 \
+BASE_DIR="${PBS_LOCALDIR:-/tmp}" CACHE_DIR="$CACHE_DIR" \
+USE_RELAY=1 RELAY_WS_URL="wss://${URL#https://}/bridge" RELAY_SECRET="$KEY" \
+REPO_ROOT="$MSL" bash "$MSL/scripts/serve/serve_vllm.sh"
