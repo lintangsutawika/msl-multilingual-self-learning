@@ -54,6 +54,10 @@ if os.environ.get("RELAY_SECRET"):
         # Optional per-request wait (s) baked into the app; unset keeps the 600 s default.
         **({"RELAY_REQUEST_TIMEOUT": os.environ["RELAY_REQUEST_TIMEOUT"]}
            if os.environ.get("RELAY_REQUEST_TIMEOUT") else {}),
+        # Optional extra API keys (comma-separated) accepted for HTTP requests only, e.g. a
+        # shareable lab key. The node bridge WebSocket still requires RELAY_SECRET.
+        **({"RELAY_EXTRA_KEYS": os.environ["RELAY_EXTRA_KEYS"]}
+           if os.environ.get("RELAY_EXTRA_KEYS") else {}),
     })
 else:
     _relay_secret = modal.Secret.from_name(SECRET_NAME)
@@ -101,6 +105,7 @@ def web():
 
     api = FastAPI()
     secret = os.environ["RELAY_SECRET"]
+    allowed_auth = {f"Bearer {k.strip()}" for k in [secret, *os.environ.get("RELAY_EXTRA_KEYS", "").split(",")] if k.strip()}
     # Per-container state (safe: exactly one container).
     bridge_ws: dict[str, object] = {"ws": None}
     pending: dict[str, asyncio.Future] = {}
@@ -158,7 +163,7 @@ def web():
         return _proxy_impl(forward_path, request, secret, ws=bridge_ws["ws"], pending=pending, send_lock=send_lock)
 
     async def _proxy_impl(forward_path: str, request: Request, secret, ws, pending, send_lock):
-        if request.headers.get("authorization") != f"Bearer {secret}":
+        if request.headers.get("authorization") not in allowed_auth:
             raise HTTPException(status_code=401, detail="bad relay token")
         if ws is None:
             raise HTTPException(status_code=503, detail="no bridge connected")

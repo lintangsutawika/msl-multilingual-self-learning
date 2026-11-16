@@ -15,6 +15,17 @@ Env:
     WEIGHT_VERSION_FILE  (optional) file holding the served weight version (int)
     MAX_GEN_TOKENS  (optional) cap on the tokens one chat completion may generate
                     (0/unset = no cap; agents send no limit of their own)
+    EPISODE_BUDGET  (optional) calls per episode (the calls between two validate scores) before
+                    the trainer charges for each further call (spool_rollout's
+                    SPOOL_EPISODE_BUDGET); each tool output then ends with a note of the
+                    count, so the agent can see it (0/unset = no note)
+    TRIAL_MAX_STEPS (optional) the agent's iteration cap (dispatch --max-iterations); the note then
+                    also says how many agent steps are left (counted as requests that carry new
+                    tool output, so condenser calls do not count), since a trial that runs into
+                    the cap is charged (spool_rollout's SPOOL_ITER_CAP_REWARD)
+    TRIAL_MAX_SECONDS (optional) the agent's wall-clock limit (task timeout x dispatch
+                      --agent-timeout-multiplier); the note then also gives the time left, counted from
+                      the trial's first model call
 
 Run (deps resolved by uv):
     uv run --with websockets --with httpx python harbor/relay/bridge.py
@@ -45,6 +56,9 @@ EPISODE_RECEIVER_URL = os.environ.get("EPISODE_RECEIVER_URL", "").rstrip("/")
 CAPTURE_DIR = os.environ.get("CAPTURE_DIR", "")
 WEIGHT_VERSION_FILE = os.environ.get("WEIGHT_VERSION_FILE", "")
 MAX_GEN_TOKENS = int(os.environ.get("MAX_GEN_TOKENS", "0") or 0)
+EPISODE_BUDGET = int(os.environ.get("EPISODE_BUDGET", "0") or 0)
+TRIAL_MAX_STEPS = int(os.environ.get("TRIAL_MAX_STEPS", "0") or 0)
+TRIAL_MAX_SECONDS = int(os.environ.get("TRIAL_MAX_SECONDS", "0") or 0)
 # Per-competition keys that sign `validate` scores (<dir>/<competition>/environment/score_key).
 SCORE_KEYS_DIR = Path(os.environ.get("SCORE_KEYS_DIR", str(Path(__file__).resolve().parents[2] / "harbor_tasks" / "mlebench-low")))
 
@@ -147,6 +161,71 @@ def _cap_tokens(body: dict) -> bool:
     return not limits
 
 
+_budget: dict[str, dict] = {}  # trial -> {"since": calls this episode, "seen": scores, "notes": {key: note}}
+
+
+def _msg_key(m: dict) -> str:
+    return m.get("tool_call_id") or hashlib.sha1(_text(m.get("content")).encode()).hexdigest()
+
+
+def _add_note(m: dict, note: str) -> None:
+    if isinstance(m.get("content"), list):
+        m["content"] = [*m["content"], {"type": "text", "text": note}]
+    else:
+        m["content"] = (m.get("content") or "") + note
+
+
+def _budget_notes(trial: str, req: dict) -> None:
+    """End the newest tool output with the episode's call count (EPISODE_BUDGET): the trainer
+    charges for calls past the budget, and without the count the agent could not see it coming.
+    The count restarts when a fresh validate score arrives (one not seen in this trial before,
+    or the answer to a call that visibly ran validate: spool_rollout's episode boundary).
+    A note, once added, is re-added to the same message in every later request, so each
+    prompt still extends the previous one token for token (the trainer joins calls into one
+    sequence only then) and SGLang's prefix cache still hits."""
+    st = _budget.setdefault(trial, {"since": 0, "steps": 0, "seen": set(), "notes": {}, "t0": time.time()})
+    messages = req.get("messages") or []
+    new_tools = []
+    for m in reversed(messages):
+        if m.get("role") == "assistant":
+            break
+        if m.get("role") == "tool":
+            new_tools.append(m)
+    obs_text = "\n".join(_text(m.get("content")) for m in new_tools)
+    accepted, _, _ = _split_scores(trial, obs_text)
+    if accepted:
+        last = next((m for m in reversed(messages) if m.get("role") == "assistant"), {})
+        ran = any(_VALIDATE_RE.search(_command(tc)) for tc in last.get("tool_calls") or [])
+        if ran or any(x not in st["seen"] for x in accepted):
+            st["since"] = 0
+        st["seen"].update(accepted)
+    st["since"] += 1
+    for m in messages:
+        if m.get("role") == "tool" and _msg_key(m) in st["notes"]:
+            _add_note(m, st["notes"][_msg_key(m)])
+    if new_tools and _msg_key(new_tools[0]) not in st["notes"]:
+        st["steps"] += 1
+        k = st["since"]
+        parts = []
+        if EPISODE_BUDGET > 0:
+            over = f" ({k - EPISODE_BUDGET} over)" if k > EPISODE_BUDGET else ""
+            parts.append(f"call {k} since your last validate score; budget {EPISODE_BUDGET}{over}. "
+                         f"Calls past the budget lower your reward: validate an improved submission before then.")
+        left = []
+        if TRIAL_MAX_STEPS > 0:
+            left.append(f"{max(0, TRIAL_MAX_STEPS - st['steps'])} of {TRIAL_MAX_STEPS} steps")
+        if TRIAL_MAX_SECONDS > 0:
+            mins = max(0, int(TRIAL_MAX_SECONDS - (time.time() - st["t0"]))) // 60
+            left.append(f"{mins // 60}h{mins % 60:02d}m")
+        if left:
+            what = "either" if len(left) > 1 else ("steps" if TRIAL_MAX_STEPS > 0 else "time")
+            parts.append(f"About {' and '.join(left)} left in this run; running out of {what} costs reward: "
+                         f"have your final submission written before then.")
+        note = "\n\n[" + " ".join(parts) + "]"
+        st["notes"][_msg_key(new_tools[0])] = note
+        _add_note(new_tools[0], note)
+
+
 def _strip_for_client(resp: dict, asked: dict) -> None:
     """Keep relay payloads small and client-visible responses unchanged."""
     for ch in resp.get("choices") or []:
@@ -203,13 +282,73 @@ def _build_record(trial: str, req: dict, resp: dict, v_start, v_end, latency_s: 
     }
 
 
+# Spool writes that fail (2026-11-10: the group hit its file quota for ~25 min and 713 calls
+# were dropped, leaving gaps that mis-assign rewards) are kept in memory per trial, in order, and
+# retried on the trial's next call and every RETRY_SECS by a background thread. A partly written
+# line is cut back off so the file stays line-aligned. If a trial's backlog passes
+# CAPTURE_MAX_PENDING lines it is dropped and a {"capture_gap": true} line is written instead
+# (once possible): the trainer skips trials with a gap.
+CAPTURE_MAX_PENDING = int(os.environ.get("CAPTURE_MAX_PENDING", "5000"))
+RETRY_SECS = 30.0
+_pending: dict[str, list[str]] = {}  # spool path -> lines not yet written, oldest first
+_gap: set[str] = set()  # spool paths that lost lines for good; marker not yet written
+
+
+def _write_lines(path: str, lines: list[str]) -> None:
+    """Append lines, keeping the file line-aligned; raise on failure."""
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    try:
+        with open(path, "a") as f:
+            f.write("".join(lines))
+    except Exception:
+        try:
+            os.truncate(path, size)  # drop a partial line
+        except Exception:
+            pass
+        raise
+
+
+def _flush(path: str) -> None:
+    """Write path's backlog (and gap marker). Caller holds _write_lock. Raises on failure."""
+    lines = list(_pending.get(path, []))
+    if path in _gap:
+        lines.append(json.dumps({"capture_gap": True, "ts": time.time()}) + "\n")
+    if not lines:
+        return
+    _write_lines(path, lines)
+    _pending.pop(path, None)
+    if path in _gap:
+        _gap.discard(path)
+        log(f"capture: wrote gap marker to {os.path.basename(path)}")
+
+
 def _append(trial: str, record: dict) -> None:
     safe = "".join(c for c in trial if c.isalnum() or c in "_-.") or "_untagged"
     path = os.path.join(CAPTURE_DIR, f"{safe}.jsonl")
     line = json.dumps(record) + "\n"
     with _write_lock:
-        with open(path, "a") as f:
-            f.write(line)
+        q = _pending.setdefault(path, [])
+        q.append(line)
+        try:
+            _flush(path)
+        except Exception as e:
+            if len(q) > CAPTURE_MAX_PENDING:
+                log(f"capture: {safe} backlog over {CAPTURE_MAX_PENDING}; dropping it and marking a gap")
+                q.clear()
+                _gap.add(path)
+            log(f"capture write failed for trial={trial} ({e}); {len(q)} line(s) queued for retry")
+
+
+def _retry_loop() -> None:
+    while True:
+        time.sleep(RETRY_SECS)
+        with _write_lock:
+            for path in set(_pending) | set(_gap):
+                try:
+                    _flush(path)
+                    log(f"capture: backlog of {os.path.basename(path)} written")
+                except Exception:
+                    pass
 
 
 async def handle(ws, send_lock: asyncio.Lock, frame: dict, client: httpx.AsyncClient) -> None:
@@ -229,10 +368,12 @@ async def handle(ws, send_lock: asyncio.Lock, frame: dict, client: httpx.AsyncCl
         content = frame["body"].encode()
         capture = None
         cap_added = False
-        if (CAPTURE_DIR or MAX_GEN_TOKENS) and frame["method"] == "POST" and path.endswith("/chat/completions"):
+        if (CAPTURE_DIR or MAX_GEN_TOKENS or EPISODE_BUDGET or TRIAL_MAX_STEPS or TRIAL_MAX_SECONDS) and frame["method"] == "POST" and path.endswith("/chat/completions"):
             try:
                 req = json.loads(frame["body"])
                 cap_added = _cap_tokens(req)
+                if (EPISODE_BUDGET > 0 or TRIAL_MAX_STEPS > 0 or TRIAL_MAX_SECONDS > 0) and trial != "_untagged":
+                    _budget_notes(trial, req)
                 if CAPTURE_DIR:
                     asked = _prepare_chat(req)
                     if not asked["stream"]:
@@ -293,6 +434,7 @@ async def main() -> None:
     if CAPTURE_DIR:
         os.makedirs(CAPTURE_DIR, exist_ok=True)
         log(f"capturing chat completions -> {CAPTURE_DIR} (version file: {WEIGHT_VERSION_FILE or 'none'})")
+        threading.Thread(target=_retry_loop, daemon=True).start()
     async with httpx.AsyncClient(timeout=float(os.environ.get("RELAY_REQUEST_TIMEOUT", "600"))) as client:
         while True:
             try:
