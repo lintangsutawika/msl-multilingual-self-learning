@@ -1,16 +1,27 @@
 # MLE-Bench task image ({comp_id}). Debian/Ubuntu (SAIL requirement), Python + mlebench.
-# Data is BAKED into the image (environment/{public,private,leaderboard.csv} -> /workspace);
-# no runtime Kaggle download/prepare.
+# Data is BAKED into the image (environment/{public,private,leaderboard.csv} -> /workspace), or, for tasks built with
+# --mount-data (Babel), the public data is bind-mounted read-only at /workspace/public and the test answers and
+# leaderboard are in tests/ (uploaded only for the final grade). No runtime Kaggle download/prepare.
 FROM python:3.12-slim
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends git curl sudo && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir git+https://github.com/openai/mle-bench.git
+RUN apt-get update && apt-get install -y --no-install-recommends git curl sudo tmux && rm -rf /var/lib/apt/lists/*
+# Harbor's Singularity bootstrap needs /usr/bin/python3, tmux and asciinema and apt-installs whatever is missing; Debian's
+# python3 would then shadow this image's Python (its exec server puts /usr/bin first on PATH) and lack mlebench/pandas.
+RUN ln -sf /usr/local/bin/python3 /usr/bin/python3 && ln -sf /usr/local/bin/python3 /usr/bin/python \
+ && pip install --no-cache-dir asciinema
+# MLE-bench pinned to the repo's revision (as in src/benchmarks/mlebench/eval), without its declared dependencies:
+# they pull TensorFlow (GBs) that no grader uses. These are what its grading modules and the graders import.
+RUN pip install --no-cache-dir --no-deps "git+https://github.com/openai/mle-bench.git@{mlebench_rev}" \
+ && pip install --no-cache-dir "pandas>=2.2,<3" numpy scipy scikit-learn tqdm diskcache tenacity pyyaml appdirs py7zr \
+      levenshtein pycocotools pyquaternion shapely pillow pymongo requests
 WORKDIR /workspace
 COPY validate_server.py /opt/msl/validate_server.py
 COPY validate.py /opt/msl/validate.py
 COPY bin/validate /usr/local/bin/validate
 COPY bin/validate-root /usr/local/bin/validate-root
 COPY score_key /etc/msl/score_key
+# Babel: the host grader's endpoint (validate_host.py) is bind-mounted here.
+RUN mkdir -p /etc/msl-validate
 COPY neutralize_rules.py /opt/msl/neutralize_rules.py
 
 # Start the validate server on box creation (keeps box alive).

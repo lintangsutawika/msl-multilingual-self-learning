@@ -14,6 +14,7 @@ Generated tasks land under ``<output>/<competition_id>/``.
 
 from __future__ import annotations
 
+import json
 import secrets
 import shutil
 import urllib.request
@@ -101,6 +102,39 @@ def _leaderboard(comp) -> Path:
     return path
 
 
+# Lines of the template Dockerfile that bake the data in; tasks built with mount_data drop them.
+BAKED_DATA_LINES = ("COPY public/ /workspace/public/", "COPY private/ /workspace/private/",
+                    "COPY leaderboard.csv /workspace/leaderboard.csv")
+
+
+def _mount(task: Path, comp) -> None:
+    """--mount-data (Babel / Singularity): the public data stays where it is and is bind-mounted read-only at
+    /workspace/public at run time (task.toml [metadata] public_data; run_babel.sh); the test answers and leaderboard
+    go to tests/, which Harbor uploads only for the final grade. Only small files are copied."""
+    shutil.copytree(comp.private_dir, task / "tests" / "private")
+    shutil.copy(_leaderboard(comp), task / "tests" / "leaderboard.csv")
+    df = task / "environment" / "Dockerfile"
+    lines = [l for l in df.read_text().splitlines(keepends=True) if l.strip() not in BAKED_DATA_LINES]
+    # Rootless Singularity can't keep a root-only file from the agent: the signing key stays on the host
+    # (environment/score_key, read by validate_host.py and the rollout forwarder); the image gets an empty one.
+    lines = ["RUN mkdir -p /etc/msl && : > /etc/msl/score_key\n" if l.strip() == "COPY score_key /etc/msl/score_key"
+             else l for l in lines]
+    df.write_text("".join(lines))
+    toml = task / "task.toml"
+    meta = f"[metadata]\npublic_data = {json.dumps(str(comp.public_dir.resolve()))}  # bind-mount at /workspace/public\n"
+    text = toml.read_text().replace("[metadata]\n", meta, 1)
+    # Rootless Singularity fakes uids: the agent's own files show up as root's and tools that check ownership (tmux)
+    # refuse them; the agent user isolates nothing there (answers and key are on the host).
+    assert '\nuser = "agent"\n' in text
+    text = text.replace('\nuser = "agent"\n', '\nuser = "root"  # Babel/Singularity: see adapter._mount\n', 1)
+    # Each attempt gets 4 CPUs and 16 GB, as in the MLE-Dojo sweeps (Singularity enforces only the memory).
+    for k, v in (("cpus", "4"), ("memory_mb", "16384")):
+        assert f"\n{k} = " in text
+        text = "\n".join(f"{k} = {v}" if l.startswith(f"{k} = ") else l for l in text.split("\n"))
+    # The verifier grades from tests/ with no Kaggle or SAIL access, so it gets no credentials.
+    toml.write_text("".join(l for l in text.splitlines(keepends=True) if not l.startswith("env = { KAGGLE_USERNAME")))
+
+
 def _bake(task: Path, comp) -> None:
     """Copy the prepared public/private splits and the leaderboard into environment/,
     where the Dockerfile COPYs them into the image (no Kaggle access at runtime)."""
@@ -110,7 +144,7 @@ def _bake(task: Path, comp) -> None:
     shutil.copy(_leaderboard(comp), env / "leaderboard.csv")
 
 
-def generate(competition_id: str, difficulty: str, output: Path) -> Path:
+def generate(competition_id: str, difficulty: str, output: Path, mount_data: bool = False) -> Path:
     """Instantiate one competition from the shared template into ``output``, with its
     prepared data baked in (run ``prepare`` first)."""
     comp = registry.get_competition(competition_id)
@@ -132,6 +166,7 @@ def generate(competition_id: str, difficulty: str, output: Path) -> Path:
         "difficulty": difficulty,
         "metric_notes": _metric_notes(comp),
         "description": _problem_desc(comp),
+        "mlebench_rev": MLEBENCH_REV,
     }
     for path in (
         task / "task.toml",
@@ -143,12 +178,13 @@ def generate(competition_id: str, difficulty: str, output: Path) -> Path:
         task / "tests" / "test.sh",
     ):
         _fill(path, **fills)
-    _bake(task, comp)
+    _mount(task, comp) if mount_data else _bake(task, comp)
     # Per-task score-signing key: copied root-only into the image; the rollout forwarder
     # reads it (SCORE_KEYS_DIR/<comp>/environment/score_key) to verify `validate` scores.
     key.write_text(old_key or secrets.token_hex(32) + "\n")
     key.chmod(0o600)
-    for _bin in ("tests/test.sh", "environment/startup.sh", "environment/bin/validate", "environment/bin/validate-root"):
+    for _bin in ("tests/test.sh", "solution/solve.sh", "environment/startup.sh", "environment/bin/validate",
+                 "environment/bin/validate-root"):
         _p = task / _bin
         if _p.exists():
             _p.chmod(0o755)
@@ -159,6 +195,7 @@ def generate_all(
     targets: dict[str, str],
     output: Path,
     prepare_data: bool = False,
+    mount_data: bool = False,
 ) -> tuple[list[tuple[str, str, Path]], list[tuple[str, str]]]:
     """Generate all (competition_id -> difficulty) targets under output.
     Returns (made, failed); one competition failing does not stop the rest."""
@@ -171,7 +208,7 @@ def generate_all(
         try:
             if prepare_data:
                 prepare(cid)
-            made.append((cid, diff, generate(cid, diff, split_out)))
+            made.append((cid, diff, generate(cid, diff, split_out, mount_data)))
         except Exception as e:
             failed.append((cid, f"{type(e).__name__}: {e}"))
     return made, failed
