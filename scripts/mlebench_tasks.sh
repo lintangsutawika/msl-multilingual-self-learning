@@ -3,6 +3,7 @@
 #
 #   scripts/mlebench_tasks.sh lite                                   # every downloaded competition of a set
 #   scripts/mlebench_tasks.sh lite spooky-author-identification ...  # some of them
+#   scripts/mlebench_tasks.sh lite --data /big/disk/mlebench-data --mount-data  # Babel tasks (data mounted, not copied)
 #
 # For the competitions given (or every competition of the set whose data is downloaded):
 #   1. valsplit.py      carve a validation set out of MLE-bench's train with the competition's own prepare.py
@@ -13,21 +14,40 @@
 #                       the final grade is MLE-bench's test)
 # Everything runs in the eval environment (src/benchmarks/mlebench/eval: MLE-bench pinned, pandas<3).
 #
-# Sets: lite (= MLE-bench's "low" split), medium, high. Env: OUT (default harbor_tasks), MLEBENCH_DATA (default
-# ~/.cache/mle-bench/data, MLE-bench's data dir). Splitting big competitions takes a while: run it in a CPU job.
+# Options: --data DIR (MLE-bench's data dir, as given to prepare_mlebench.sh; default ~/.cache/mle-bench/data or
+# $MLEBENCH_DATA), --mount-data (Babel / Singularity: the data is mounted read-only at run time instead of copied into
+# each task; run the tasks with src/benchmarks/mlebench/run_babel.sh). Sets: lite (= MLE-bench's "low" split), medium,
+# high. Env: OUT (default harbor_tasks). Splitting big competitions takes a while: run it in a CPU job.
 set -euo pipefail
-SET=${1:?usage: $0 SET [COMPETITION ...]}; shift
-cd "$(dirname "$0")/.."
-OUT=${OUT:-harbor_tasks}
+MOUNT=()
 DATA=${MLEBENCH_DATA:-$HOME/.cache/mle-bench/data}
+args=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --data) DATA=$2; shift 2 ;;
+        --data=*) DATA=${1#--data=}; shift ;;
+        --mount-data) MOUNT=(--mount-data); shift ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+SET=${1:?usage: $0 SET [COMPETITION ...] [--data DIR] [--mount-data]}; shift
+export MLEBENCH_DATA=$(realpath -m "$DATA")  # every tool below reads the data from here (src/benchmarks/mlebench/__init__.py)
+OUT=$(realpath -m "${OUT:-harbor_tasks}")
+cd "$(dirname "$0")/.."
 uv sync -q --project src/benchmarks/mlebench/eval
 PY=(uv run -q --project src/benchmarks/mlebench/eval python)
 case $SET in lite) LEVEL=low ;; medium|high) LEVEL=$SET ;; *) echo "unknown set $SET (lite, medium, high)" >&2; exit 2 ;; esac
 
 if [ $# -gt 0 ]; then
     comps=("$@")
+    for c in "${comps[@]}"; do
+        [ -d "$MLEBENCH_DATA/$c/prepared/public" ] \
+            || { echo "$c: not downloaded to $MLEBENCH_DATA (scripts/prepare_mlebench.sh $SET $c --data ...)" >&2; exit 1; }
+    done
 else  # the set's competitions (MLE-bench's split file) whose data is downloaded
     splits=$("${PY[@]}" -c 'from mlebench.registry import registry; print(registry.get_splits_dir())')
+    DATA=$MLEBENCH_DATA
     comps=()
     for c in $(cat "$splits/$LEVEL.txt"); do
         if [ -d "$DATA/$c/prepared/public" ]; then comps+=("$c"); else echo "skip $c: not downloaded"; fi
@@ -43,7 +63,7 @@ echo "== 2. leak audit"
 "${PY[@]}" -m src.benchmarks.mlebench.audit_leaks --competition "$C" \
     || { echo "leak audit failed: no tasks built (fix the split first)" >&2; exit 1; }
 echo "== 3. plain tasks"
-"${PY[@]}" -m src.benchmarks.mlebench --competition "$C" --output "$OUT"
+"${PY[@]}" -m src.benchmarks.mlebench --competition "$C" --output "$OUT" ${MOUNT[@]+"${MOUNT[@]}"}
 echo "== 4. split tasks"
 for c in "${comps[@]}"; do
     plain=$(ls -d "$OUT"/mlebench-*/"$c" | grep -v -- '-split/')   # main.py files it under the competition's level

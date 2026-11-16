@@ -4,6 +4,7 @@
 #
 #   scripts/prepare_mlebench.sh lite                    # every competition of a set (a folder on the Drive)
 #   scripts/prepare_mlebench.sh lite spooky-author-identification leaf-classification   # some of them
+#   scripts/prepare_mlebench.sh lite --data /big/disk/mlebench-data   # data dir (default ~/.cache/mle-bench/data)
 #
 # The Drive holds MLE-bench's *prepared* data: what `mlebench prepare` makes from Kaggle's download (Kaggle's train
 # split into train / test, with the test answers apart). One tar per competition, <set>/<comp>.tar, holding
@@ -13,12 +14,20 @@
 # Env:
 #   DRIVE          rclone path of the shared folder (default gdrive:mlebench-prepared). If the folder was shared
 #                  with you, it is under "Shared with me": DRIVE="gdrive,shared_with_me:mlebench-prepared"
-#   MLEBENCH_DATA  MLE-bench's data dir (default ~/.cache/mle-bench/data, where MLE-bench looks; it can be a symlink
-#                  to a big disk)
+#   MLEBENCH_DATA  same as --data
 set -euo pipefail
-SET=${1:?usage: $0 SET [COMPETITION ...]}; shift
-DRIVE=${DRIVE:-gdrive:mlebench-prepared}
 DATA=${MLEBENCH_DATA:-$HOME/.cache/mle-bench/data}
+args=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --data) DATA=$2; shift 2 ;;
+        --data=*) DATA=${1#--data=}; shift ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+SET=${1:?usage: $0 SET [COMPETITION ...] [--data DIR]}; shift
+DRIVE=${DRIVE:-gdrive:mlebench-prepared}
 mkdir -p "$DATA"
 if [ $# -gt 0 ]; then comps=("$@"); else mapfile -t comps < <(rclone lsf "$DRIVE/$SET" --include '*.tar' | sed 's/\.tar$//'); fi
 [ ${#comps[@]} -gt 0 ] || { echo "no competitions found in $DRIVE/$SET" >&2; exit 1; }
