@@ -12,7 +12,7 @@
 #   3. main.py          plain tasks:  $OUT/mlebench-<level>/<comp>        (validate grades the test answers)
 #   4. make_split_tasks.py  split tasks: $OUT/mlebench-<level>-split/<comp>  (validate grades the validation set,
 #                       the final grade is MLE-bench's test)
-# Everything runs in the eval environment (src/benchmarks/mlebench/eval: MLE-bench pinned, pandas<3).
+# Everything runs in the prepare environment (src/benchmarks/mlebench/prepare: MLE-bench pinned, pandas<3).
 #
 # Options: --data DIR (MLE-bench's data dir, as given to prepare_mlebench.sh; default ~/.cache/mle-bench/data or
 # $MLEBENCH_DATA), --mount-data (Babel / Singularity: the data is mounted read-only at run time instead of copied into
@@ -35,8 +35,8 @@ SET=${1:?usage: $0 SET [COMPETITION ...] [--data DIR] [--mount-data]}; shift
 export MLEBENCH_DATA=$(realpath -m "$DATA")  # every tool below reads the data from here (src/benchmarks/mlebench/__init__.py)
 OUT=$(realpath -m "${OUT:-harbor_tasks}")
 cd "$(dirname "$0")/.."
-uv sync -q --project src/benchmarks/mlebench/eval
-PY=(uv run -q --project src/benchmarks/mlebench/eval python)
+uv sync -q --project src/benchmarks/mlebench/prepare
+PY=(uv run -q --project src/benchmarks/mlebench/prepare python)
 case $SET in lite) LEVEL=low ;; medium|high) LEVEL=$SET ;; *) echo "unknown set $SET (lite, medium, high)" >&2; exit 2 ;; esac
 
 if [ $# -gt 0 ]; then

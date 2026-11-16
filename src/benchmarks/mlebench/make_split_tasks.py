@@ -16,9 +16,9 @@ prepare.py (valsplit.py), and the final grade is MLE-bench's, on MLE-bench's unt
 
 The split must exist (valsplit.py) and should have passed the leak audit (audit_leaks.py): scripts/mlebench_tasks.sh
 runs them in order. Leaderboard and score-signing key are copied unchanged, so the forwarder verifies `validate` scores of both
-task sets with the same keys. Run it in the eval environment (it reads the split through MLE-bench):
+task sets with the same keys. Run it in the prepare environment (it reads the split through MLE-bench):
 
-    uv run --project src/benchmarks/mlebench/eval python src/benchmarks/mlebench/make_split_tasks.py \
+    uv run --project src/benchmarks/mlebench/prepare python src/benchmarks/mlebench/make_split_tasks.py \
         --tasks a,b,c [--src ...] [--dst ...]
 
 (The earlier split, halving the test rows by id hash, is split_grade.py; it is kept for the MLE-Dojo tasks.)

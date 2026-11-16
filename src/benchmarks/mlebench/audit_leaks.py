@@ -1,7 +1,7 @@
 """Leak audit of MLE-bench validation splits: can the agent find any answer (MLE-bench test or our validation) in
 what it sees (valsplit/public, mounted at /workspace/public)?
 
-    uv run --project src/benchmarks/mlebench/eval python -m src.benchmarks.mlebench.audit_leaks [--competition a,b]
+    uv run --project src/benchmarks/mlebench/prepare python -m src.benchmarks.mlebench.audit_leaks [--competition a,b]
         # default: every competition with a split
 
 For each competition, with A = answer columns (private answers minus the id column) and ids = test + validation ids:

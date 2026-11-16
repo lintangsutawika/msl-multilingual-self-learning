@@ -9,7 +9,7 @@ submissions sent by the container's `validate` command over 127.0.0.1 (Singulari
 
 Writes DIR/endpoint ("<url> <token>"); run_babel.sh bind-mounts DIR read-only at /etc/msl-validate. Requests must
 carry the token (other users' jobs on the node can reach the port, but not read that file). Run it with the grader
-environment (src/benchmarks/mlebench/eval: the image's MLE-bench revision and pandas<3, so scores match).
+environment (src/benchmarks/mlebench/prepare: the image's MLE-bench revision and pandas<3, so scores match).
 """
 from __future__ import annotations
 

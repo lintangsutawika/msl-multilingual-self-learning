@@ -1,12 +1,13 @@
-# MLE-bench eval environment: preparing data, the validation split and grading, apart from the repo's .venv.
+# MLE-bench preparation environment: downloading MLE-bench, the validation split and building tasks (and the host-side
+# validate grader on Babel), apart from the repo's .venv, which runs the evaluation (Harbor, agents).
 #
-#   uv run --project src/benchmarks/mlebench/eval python -m <module> ...
+#   uv run --project src/benchmarks/mlebench/prepare python -m <module> ...
 #
 # Why a separate environment: the repo's .venv has pandas 3, and several of MLE-bench's prepare.py scripts break under
 # it (`.unique()` returns an ArrowStringArray that train_test_split rejects). Here MLE-bench is pinned to the same
 # revision as the repo (pyproject.toml), with pandas<3, so scores match those of the grader in the task image.
 [project]
-name = "mlebench-eval"
+name = "mlebench-prepare"
 version = "0.1.0"
 requires-python = ">=3.12,<3.13"
 dependencies = [

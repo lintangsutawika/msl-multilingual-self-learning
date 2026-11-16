@@ -10,9 +10,9 @@ As in the MLE-Dojo tasks, the agent sees ONE test set and writes ONE predictions
 shuffled into the test inputs (both come from Kaggle's train, so they can't be told apart). `validate` scores only the
 validation ids (answers in private_val/), the final grade only MLE-bench's test ids (private/).
 
-    uv run --project src/benchmarks/mlebench/eval python -m src.benchmarks.mlebench.valsplit --competition spooky-author-identification[,...] [--force]
+    uv run --project src/benchmarks/mlebench/prepare python -m src.benchmarks.mlebench.valsplit --competition spooky-author-identification[,...] [--force]
 
-Run it in the eval environment (src/benchmarks/mlebench/eval: pandas<3): MLE-bench's prepare.py scripts break under
+Run it in the prepare environment (src/benchmarks/mlebench/prepare: pandas<3): MLE-bench's prepare.py scripts break under
 pandas 3.
 
 Writes <mlebench data>/<cid>/valsplit/{public,private_val} next to MLE-bench's prepared/ (private/ stays prepared/private).
@@ -1162,8 +1162,8 @@ def require_pandas2() -> None:
     """MLE-bench's prepare.py scripts break under pandas 3 (`.unique()` returns an ArrowStringArray that
     train_test_split rejects): stop early instead of failing halfway through a competition."""
     if int(pd.__version__.split(".")[0]) >= 3:
-        raise SystemExit(f"pandas {pd.__version__}: run this in the eval environment (pandas<3: "
-                         "uv run --project src/benchmarks/mlebench/eval python ...)")
+        raise SystemExit(f"pandas {pd.__version__}: run this in the prepare environment (pandas<3: "
+                         "uv run --project src/benchmarks/mlebench/prepare python ...)")
 
 
 def main() -> None:
