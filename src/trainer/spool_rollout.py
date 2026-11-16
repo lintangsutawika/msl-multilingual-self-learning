@@ -9,14 +9,16 @@ into MILES Samples and blocks until a full batch (rollout_batch_size episodes) i
 
 Episodes (MLE-Bench): within a trial, an episode is the run of calls between two
 validate results. The call whose request first shows a ``score=`` observation
-closes the episode made of the calls before it; its reward is the binary
-improvement of that score over the trial's best so far (src.episode.mlebench).
-Calls of a still-open episode are not eligible yet.
+closes the episode made of the calls before it; its reward is the gain in Kaggle
+leaderboard percentile over the trial's best so far (the first scored episode earns its
+own percentile; see _closed_episodes). Calls of a still-open episode are not eligible yet.
 
 The final episode (the calls after the trial's last validate result, or the whole trial
 if it never validated) closes when the task verifier has graded the trial's final
-submission (<trials>/<trial>/*/verifier/grade.json). Its reward is the medal: 1.0 gold,
-0.67 silver, 0.33 bronze, 0.1 a valid submission without a medal, 0 no valid submission.
+submission (<trials>/<trial>/*/verifier/grade.json). Its reward is the final score's
+leaderboard percentile q (the scale of the validate episodes; bronze is about q 0.9), 0 for no
+valid submission. Without a leaderboard (or SPOOL_FINAL_REWARD=medal) it is the medal: 1.0
+gold, 0.67 silver, 0.33 bronze, 0.1 a valid submission without a medal.
 Most of a trial's time is spent after its last validate, and without this that work was
 never trained. At most SPOOL_MAX_FINAL_FRAC of a batch comes from final episodes.
 
@@ -45,6 +47,67 @@ Env:
     SPOOL_TRIALS_DIR     the rollout job's harbor trial dirs, for the final grades
                          (default <spool>/../trials)
     SPOOL_MAX_FINAL_FRAC at most this fraction of a batch from final episodes (default 0.25)
+    SPOOL_REWARD         validate-episode reward: "sota" = 1 if the episode's validate score beats the
+                         task's running record (the best validate score of ANY trial on that task
+                         before it, by time) by at least one more leaderboard entry, else 0; the
+                         record is over validate-split scores only (never the held-out test split);
+                         with SPOOL_MAX_EPISODE=K, only each trial's first K validate results count.
+                         TTT-Discover-style discovery reward (arXiv 2601.16175: R(s) > r_sota), run 19.
+                         "percentile" (default) = leaderboard percentile
+                         gain; "binary" = 1 if it beats the trial's best, first scored episode skipped;
+                         "rank" = like binary, but only a score that passes at least one more
+                         leaderboard entry than the trial's best counts (needs a leaderboard)
+    SPOOL_TRUNC_REWARD   reward of an episode with a call that hit the generation cap (default -1);
+                         "none": no truncation penalty, the episode keeps its ordinary reward
+    SPOOL_MALFORMED_REWARD  if set: reward of an episode with a malformed tool call, i.e. a response
+                         with the <tool_call> token (SPOOL_TOOL_CALL_TOKEN, default 248058 = Qwen3.5)
+                         that SGLang's parser could not turn into a tool call. The agent sees a turn
+                         without an action and stops, so the trial ends with no submission, which
+                         otherwise scores 0 like an honest failure (run 14: <tool_call><file_editor>
+                         instead of <function=file_editor> went 0.1% -> 4.2% of calls at v20, ending
+                         72 of 78 trials after ~8 calls). Unset (default): no penalty.
+    SPOOL_FINAL_REWARD   final-episode reward: "percentile" (default) = q(final score);
+                         "medal" = medal tiers (1 / 0.67 / 0.33, 0.1 valid without a medal);
+                         "val_delta" = q(final submission's val score) - q(trial's best validate),
+                         signed (see _closed_episodes)
+    SPOOL_EPISODE_BUDGET calls per episode before each further call costs SPOOL_OVER_BUDGET_COST
+                         (default 0 = no charge; the forwarder's EPISODE_BUDGET shows the agent
+                         the count)
+    SPOOL_OVER_BUDGET_COST  charge per call past the budget (default 0.005); an episode's reward
+                         never goes below SPOOL_TRUNC_REWARD from it
+    SPOOL_IMPROVE_DECAY  "harmonic": with SPOOL_REWARD=binary|rank, the k-th rewarded improvement of a
+                         trial earns 1/k, so a trial's improvement reward grows like log(k), not k
+                         (run 12: capped trials collected ~25 episodes of +1 and out-earned trials
+                         that finished; default unset = every improvement earns 1)
+    SPOOL_ITER_CAP_REWARD  final-episode reward of a trial that ran into the agent's iteration cap
+                         (MAX_ITERATIONS; OpenHands logs "Agent reached maximum") or its wall-clock
+                         limit (harbor's AgentTimeoutError), whatever its
+                         grade (default unset = graded as usual); the final reward is
+                         min(graded reward, this)
+    SPOOL_QUIT_REWARD    if set: final-episode reward (at most) of a trial that ended on a plain-text
+                         turn (the last call has no tool call: OpenHands treats it as the agent being
+                         done) with no valid submission. Run 15: once broken tool calls cost -1, the
+                         model stopped with text instead ("Let me continue waiting for the output"),
+                         ending eval trials without a submission (s69-s129: 41-69% valid). A valid
+                         submission followed by a sign-off message is not penalized (the base model
+                         ends 43% of trials that way). Default unset: no penalty.
+    SPOOL_INVALID_REWARD if set: final-episode reward (at most) of any graded trial whose final
+                         submission is invalid, however the trial ended (broken tool call, plain-text
+                         turn, OpenHands' stuck detector, wrong file). Each narrower penalty moved the
+                         failure to the next unpenalized exit: run 14 broken calls, run 15 plain-text
+                         turns, run 17 stuck loops (evals s89-s169: 31-53% valid). Default unset.
+    SPOOL_MAX_EPISODE    if set to K > 0: train only on each trial's first K validate episodes (calls up
+                         to its K-th validate result); later episodes and the final episode are dropped.
+                         For the reward-validation experiment (2026-11-13): does optimizing only the
+                         early-episode reward raise the terminal (final-submission) reward on the eval
+                         tasks? Use with SPOOL_NSTEP=1. The episodes close at their validate, so they
+                         train before the trial ends. Default unset: all episodes.
+    SPOOL_NSTEP          episode i is trained on the return r_i + g r_(i+1) + ... + g^(n-1) r_(i+n-1)
+                         over the next episodes of its trial (default 1 = its own reward), so the
+                         attempt before an improvement shares in it
+    SPOOL_GAMMA          g of that return (default 0.5)
+    SPOOL_TASKS_DIR      task dirs with the baked leaderboards (<task>/environment/leaderboard.csv;
+                         default <repo>/harbor_tasks/mlebench-low)
     SPOOL_WATCHDOG       1 = log watchdog/* behavior metrics of the newest weights (default off)
     SPOOL_POLL_SECS      poll interval while waiting for a batch (default 30)
     SPOOL_SORT           "longest" = longest sequences first (memory tests); default oldest first
@@ -53,6 +116,8 @@ Env:
 """
 from __future__ import annotations
 
+import bisect
+import csv
 import json
 import os
 import time
@@ -68,9 +133,64 @@ MAX_TOKENS = int(os.environ.get("SPOOL_MAX_TOKENS", "262144"))
 MAX_STALENESS = os.environ.get("SPOOL_MAX_STALENESS")
 POLL_SECS = float(os.environ.get("SPOOL_POLL_SECS", "30"))
 TRIALS_DIR = Path(os.environ.get("SPOOL_TRIALS_DIR", str(SPOOL_DIR.parent / "trials")))
+REWARD = os.environ.get("SPOOL_REWARD", "percentile")  # "percentile" | "binary" (validate episodes)
+FINAL_REWARD = os.environ.get("SPOOL_FINAL_REWARD", "percentile")  # "percentile" | "medal"
+TASKS_DIR = Path(os.environ.get("SPOOL_TASKS_DIR", str(_REPO / "harbor_tasks" / "mlebench-low")))
 MEDAL_REWARD = {"gold": 1.0, "silver": 0.67, "bronze": 0.33}
 VALID_REWARD = 0.1  # valid final submission without a medal: finishing properly beats quitting
+# Below every normal reward (all >= 0), so a repetition loop is pushed down, not just unrewarded.
+_TRUNC = os.environ.get("SPOOL_TRUNC_REWARD", "-1")
+TRUNC_REWARD = None if _TRUNC.strip().lower() in ("none", "") else float(_TRUNC)
+MALFORMED_REWARD = os.environ.get("SPOOL_MALFORMED_REWARD")
+MALFORMED_REWARD = float(MALFORMED_REWARD) if MALFORMED_REWARD not in (None, "") else None
+TOOL_CALL_TOKEN = int(os.environ.get("SPOOL_TOOL_CALL_TOKEN", "248058"))
+
+
+def _malformed(call: dict) -> bool:
+    """A response that started a tool call SGLang could not parse (no tool_calls came back)."""
+    return (not call.get("tool_calls")) and TOOL_CALL_TOKEN in (call.get("response_token_ids") or ())
+
+
+def _penalty(episode: list[dict]) -> float | None:
+    """TRUNC_REWARD for a generation-cap hit, MALFORMED_REWARD for a malformed tool call, else None."""
+    if TRUNC_REWARD is not None and any(c.get("finish_reason") == "length" for c in episode):
+        return TRUNC_REWARD
+    if MALFORMED_REWARD is not None and any(_malformed(c) for c in episode):
+        return MALFORMED_REWARD
+    return None
+ITER_CAP_REWARD = os.environ.get("SPOOL_ITER_CAP_REWARD")
+IMPROVE_DECAY = os.environ.get("SPOOL_IMPROVE_DECAY", "")
+ITER_CAP_REWARD = float(ITER_CAP_REWARD) if ITER_CAP_REWARD not in (None, "") else None
+QUIT_REWARD = os.environ.get("SPOOL_QUIT_REWARD")
+QUIT_REWARD = float(QUIT_REWARD) if QUIT_REWARD not in (None, "") else None
+MAX_EPISODE = int(os.environ.get("SPOOL_MAX_EPISODE", "0") or 0)
+INVALID_REWARD = os.environ.get("SPOOL_INVALID_REWARD")
+INVALID_REWARD = float(INVALID_REWARD) if INVALID_REWARD not in (None, "") else None
+
+
+def _invalid_final(trial: str) -> bool:
+    """The trial was graded and its final submission is invalid (missing, wrong file or format)."""
+    grade = _grade(trial)
+    return grade is not None and not _valid(grade)
+
+
+def _quit_early(trial: str, records: list[dict]) -> bool:
+    """The trial ended on a plain-text turn (no tool call, a normal stop) without a valid
+    submission, and not because a limit stopped it."""
+    calls = [r for r in records if r.get("response_token_ids") is not None]
+    if not calls:
+        return False
+    last = calls[-1]
+    if last.get("tool_calls") or last.get("finish_reason") != "stop":
+        return False
+    grade = _grade(trial)
+    return grade is not None and not _valid(grade) and not _hit_limit(trial)
 MAX_FINAL_FRAC = float(os.environ.get("SPOOL_MAX_FINAL_FRAC", "0.25"))
+EPISODE_BUDGET = int(os.environ.get("SPOOL_EPISODE_BUDGET", "0") or 0)
+OVER_BUDGET_COST = float(os.environ.get("SPOOL_OVER_BUDGET_COST", "0.005"))
+NSTEP = max(1, int(os.environ.get("SPOOL_NSTEP", "1")))
+GAMMA = float(os.environ.get("SPOOL_GAMMA", "0.5"))
+_STATS: dict[str, dict] = {}  # episode's first call id -> {"reward", "calls", "partial"} (batch log)
 WATCHDOG = os.environ.get("SPOOL_WATCHDOG") == "1"  # watchdog/* W&B metrics (off: not yet tested at scale)
 WATCHDOG_MIN_CALLS = 200  # don't judge a rate on fewer calls
 _FINAL_IDS: set[str] = set()  # call ids of final episodes (for the batch log)
@@ -117,21 +237,117 @@ def _to_score(raw: str) -> float | None:
     return v if v == v and v not in (float("inf"), float("-inf")) else None
 
 
-def _final_reward(trial: str) -> float | None:
-    """Medal reward of the trial's graded final submission, or None while it is not graded."""
+def _grade(trial: str) -> dict | None:
+    """The verifier's grade of the trial's final submission, or None while it is not graded.
+    Waits for harbor's result.json too (written just after the grade), which says whether the
+    agent was stopped by its wall-clock limit (_hit_limit)."""
     for g in TRIALS_DIR.glob(f"{trial}/*/verifier/grade.json"):
+        if not (g.parent.parent / "result.json").exists():
+            return None
         try:
-            grade = json.loads(g.read_text())
+            return json.loads(g.read_text())
         except Exception:
             return None  # being written
-        if not grade.get("valid_submission") or grade.get("score") is None:
-            return 0.0
-        return MEDAL_REWARD.get(grade.get("medal") or "", VALID_REWARD)
     return None
 
 
+def _hit_limit(trial: str) -> bool:
+    """True if the trial's agent was stopped by a limit rather than finishing: its iteration cap
+    (OpenHands' "Agent reached maximum" in the agent log; runs 11/12: 6% of trials at base,
+    40-77% after training, while each validate improvement paid and running out cost nothing)
+    or its wall-clock limit (harbor's AgentTimeoutError in result.json; run 13 moved there once
+    the cap was charged: 2% -> 22% of trials hit the 4h limit)."""
+    for r in TRIALS_DIR.glob(f"{trial}/*/result.json"):
+        try:
+            if ((json.loads(r.read_text()).get("exception_info") or {}).get("exception_type")
+                    == "AgentTimeoutError"):
+                return True
+        except Exception:
+            pass
+    for f in TRIALS_DIR.glob(f"{trial}/*/agent/steps.jsonl"):
+        try:
+            with open(f, "rb") as h:
+                h.seek(max(0, f.stat().st_size - 200_000))
+                return b"Agent reached maximum" in h.read()
+        except OSError:
+            return False
+    return False
+
+
+def _valid(grade: dict) -> bool:
+    return bool(grade.get("valid_submission")) and _to_score(grade.get("score")) is not None
+
+
+def _final_val(trial: str) -> float | None:
+    """The final submission's score on the scale of `validate`: its val-half score in split
+    tasks (mlebench-low-split), else the full test score (validate graded the full test set
+    there). None if it is invalid."""
+    grade = _grade(trial) or {}
+    if "val_score" in grade:
+        return _to_score(grade["val_score"]) if grade.get("val_valid") else None
+    return _to_score(grade["score"]) if _valid(grade) else None
+
+
+def _final_reward(trial: str, board: list[float] | None = None,
+                  lower_is_better: bool = False) -> float | None:
+    """Reward of the trial's graded final submission, or None while it is not graded:
+    q(final score) with a leaderboard (the validate episodes' scale, so a final submission
+    and a validate of the same score pay the same), else the medal tier; 0 if invalid.
+    (A flat 0.1 for any valid non-medal submission was at odds with validate episodes,
+    whose first score alone earns its q, median ~0.11.)"""
+    grade = _grade(trial)
+    if grade is None:
+        return None
+    if FINAL_REWARD == "val_delta":
+        return 0.0  # graded; the reward needs the trial's best validate (_closed_episodes)
+    if not _valid(grade):
+        return 0.0
+    if FINAL_REWARD == "percentile" and board:
+        return _percentile(board, _to_score(grade["score"]), lower_is_better)
+    return MEDAL_REWARD.get(grade.get("medal") or "", VALID_REWARD)
+
+
+_LEADERBOARDS: dict[str, list[float] | None] = {}
+
+
+def _leaderboard(competition: str) -> list[float] | None:
+    """Sorted Kaggle leaderboard scores of a competition (baked into its task), or None."""
+    if competition not in _LEADERBOARDS:
+        scores = None
+        try:
+            with open(TASKS_DIR / competition / "environment" / "leaderboard.csv") as f:
+                rows = csv.DictReader(f)
+                scores = sorted(float(r["score"]) for r in rows
+                                if r.get("score") not in (None, "") and r.get("hasScore", "True") != "False")
+        except (OSError, ValueError, KeyError):
+            pass
+        _LEADERBOARDS[competition] = scores or None
+    return _LEADERBOARDS[competition]
+
+
+def _percentile(board: list[float], score: float, lower_is_better: bool) -> float:
+    """Fraction of the leaderboard a score beats (ties count half): 0 = last, 1 = first."""
+    below, above = bisect.bisect_left(board, score), bisect.bisect_right(board, score)
+    beaten = len(board) - above if lower_is_better else below
+    return (beaten + 0.5 * (above - below)) / len(board)
+
+
+def _over_budget(reward: float, episode: list[dict]) -> float:
+    """Charge OVER_BUDGET_COST per call past EPISODE_BUDGET, down to TRUNC_REWARD at most."""
+    over = len(episode) - EPISODE_BUDGET
+    if EPISODE_BUDGET <= 0 or over <= 0:
+        return reward
+    floor = TRUNC_REWARD if TRUNC_REWARD is not None else -1.0
+    return max(reward - OVER_BUDGET_COST * over, min(reward, floor))
+
+
 def _closed_episodes(records: list[dict], lower_is_better: bool,
-                     final_reward: float | None = None) -> list[tuple[list[dict], float]]:
+                     final_reward: float | None = None,
+                     board: list[float] | None = None,
+                     final_val: float | None = None,
+                     iter_cap: bool = False, quit_early: bool = False,
+                     invalid: bool = False,
+                     sota: tuple[list[float], list[float]] | None = None) -> list[tuple[list[dict], float]]:
     """(calls, reward) for every closed episode of a trial, in trial order.
 
     A call whose new tool output carries a signed score closes the episode made of the calls
@@ -141,28 +357,52 @@ def _closed_episodes(records: list[dict], lower_is_better: bool,
     `validate`. (validate run from inside a script is not visible, so new scores are always
     kept.)
 
-    If one command validated several files (a batch of experiments), the episode is rewarded
-    on the batch AVERAGE (1 if it beats the trial's best so far): padding a batch with weak
-    runs costs reward, so batches of consistently good experiments are what pays. The trial's
-    best then becomes the batch's best file, which the agent really has.
+    Reward (with `board`, the competition's leaderboard; SPOOL_REWARD=percentile, the default):
+    the gain in leaderboard percentile, max(0, q(score) - q(trial's best so far)), where q is
+    the fraction of the leaderboard a score beats and the best before the first score counts
+    as q = 0. So the first scored episode earns q(first score), every later one its percentile
+    gain, and a trial's rewards add up to about q(its best score): a strong pipeline pays at
+    once, small tweaks earn little, starting weak is never free. (The relative binary reward,
+    SPOOL_REWARD=binary, rewarded only beating the trial's own best and skipped the first
+    scored episode; run 7's first and best scores got worse while that reward stayed flat.)
+    Without a leaderboard the binary reward is used.
 
-    The episode that produces a trial's first usable score is skipped: with no earlier
-    best to beat its reward is always 1, so it carries no learning signal. Episodes whose
-    validate produced no usable score (broken submission) keep their reward of 0.
+    If one command validated several files (a batch of experiments), the episode is rewarded
+    on the batch AVERAGE: padding a batch with weak runs costs reward, so batches of
+    consistently good experiments are what pays. The trial's best then becomes the batch's
+    best file, which the agent really has. Episodes whose validate produced no usable score
+    (broken submission) get reward 0.
 
     An episode with a call that hit the generation cap (finish_reason "length", the
-    rollout job's MAX_GEN_TOKENS) gets reward 0 whatever its score: a runaway response
-    (e.g. a repetition loop) must not be reinforced by a lucky validate after it.
-    The score still counts toward the trial's best.
+    rollout job's MAX_GEN_TOKENS) gets TRUNC_REWARD (default -1) whatever its score: a
+    runaway response (in practice a repetition loop) must be pushed down, not merely left
+    unrewarded. At reward 0 it looked like any episode without a gain (most of them), and
+    run 8 drifted into loops from step 70 (0% -> 5.7% of calls, valid finals 88% -> 10%).
+    The score still counts toward the trial's best. Truncated episodes are always kept,
+    also the first-score episode the binary reward otherwise skips.
 
-    With final_reward (the graded final submission's medal reward), the calls after the last
+    With final_reward (the graded final submission's reward, see _final_reward), the calls after the last
     validate result (the whole trial if there was none) form a closed final episode with
-    that reward (0 if it hit the generation cap).
+    that reward (TRUNC_REWARD if it hit the generation cap).
+
+    SPOOL_FINAL_REWARD=val_delta (with a leaderboard): the final episode is judged like a
+    validate, on the same scale: q(final_val) - q(trial's best validate), with final_val the
+    final submission's score on the validate split (_final_val; q = 0 if invalid, and the best
+    counts as q = 0 if the trial never validated). Unlike a validate it is signed: a validate
+    may explore, but the submission is the trial's commitment, so submitting worse than one's
+    own best costs. The medal / absolute-q final rewards gave not validating its own, easier
+    reward; this one closes that exit (run 9: final episodes 0.22 vs validates 0.046).
+
+    SPOOL_EPISODE_BUDGET: each episode past the budget is charged per call (_over_budget), so
+    a long stretch without a validate (run 10's stuck terminals, 100+ calls of Ctrl-C at
+    reward 0) is pushed down instead of costing as little as a short failed attempt.
     """
     out: list[tuple[list[dict], float]] = []
     episode: list[dict] = []
     scores: list[float] = []
     seen_raw: set[str] = set()
+    percentile = REWARD == "percentile" and bool(board)
+    n_improved = 0
     ordered = sorted(records, key=lambda r: r.get("ts", 0))
     for i, rec in enumerate(ordered):
         raw = rec.get("observed_validate_scores") or []
@@ -174,22 +414,65 @@ def _closed_episodes(records: list[dict], lower_is_better: bool,
             seen_raw.update(raw)
             if fresh:
                 seen = [s for s in (_to_score(x) for x in raw) if s is not None]
-                reward = 0  # validate ran but produced no usable score
+                reward = 0.0  # validate ran but produced no usable score
+                first = False
                 if seen:
                     mean = sum(seen) / len(seen)
-                    if scores:
-                        best = min(scores) if lower_is_better else max(scores)
-                        reward = int(mean < best if lower_is_better else mean > best)
+                    best = (min(scores) if lower_is_better else max(scores)) if scores else None
+                    if percentile:
+                        prev = _percentile(board, best, lower_is_better) if scores else 0.0
+                        reward = max(0.0, _percentile(board, mean, lower_is_better) - prev)
+                    elif REWARD == "sota" and board and sota is not None:
+                        # the record before this call: best validate percentile of any trial's earlier call
+                        i_rec = bisect.bisect_left(sota[0], float(rec.get("ts") or 0.0))
+                        record = sota[1][i_rec - 1] if i_rec > 0 else None
+                        reward = float(record is None or _percentile(board, mean, lower_is_better) > record)
+                    elif scores and REWARD == "rank" and board:
+                        reward = float(_percentile(board, mean, lower_is_better)
+                                       > _percentile(board, best, lower_is_better))
+                    elif scores:
+                        reward = float(mean < best if lower_is_better else mean > best)
+                    if not percentile and REWARD != "sota" and reward > 0 and IMPROVE_DECAY == "harmonic":
+                        n_improved += 1
+                        reward /= n_improved
+                    first = not scores
                     scores.append(min(seen) if lower_is_better else max(seen))
-                if any(c.get("finish_reason") == "length" for c in episode):
-                    reward = 0
-                if episode and (len(scores) != 1 or not seen):  # skip the first-score episode
-                    out.append((episode, float(reward)))
+                reward = _over_budget(reward, episode)
+                penalty = _penalty(episode)
+                truncated = penalty is not None
+                if truncated:
+                    reward = penalty
+                if episode and (percentile or REWARD == "sota" or not first or truncated):  # binary: skip the first-score episode
+                    out.append((episode, reward))
                 episode = []
         episode.append(rec)
     if final_reward is not None and episode:
-        truncated = any(c.get("finish_reason") == "length" for c in episode)
-        out.append((episode, 0.0 if truncated else float(final_reward)))
+        if FINAL_REWARD == "val_delta" and board:
+            best = (min(scores) if lower_is_better else max(scores)) if scores else None
+            prev = _percentile(board, best, lower_is_better) if scores else 0.0
+            now = _percentile(board, final_val, lower_is_better) if final_val is not None else 0.0
+            final_reward = now - prev
+        if iter_cap and ITER_CAP_REWARD is not None:
+            final_reward = min(float(final_reward), ITER_CAP_REWARD)
+        if quit_early and QUIT_REWARD is not None:
+            final_reward = min(float(final_reward), QUIT_REWARD)
+        if invalid and INVALID_REWARD is not None:
+            final_reward = min(float(final_reward), INVALID_REWARD)
+        penalty = _penalty(episode)
+        out.append((episode, penalty if penalty is not None else _over_budget(float(final_reward), episode)))
+    return out
+
+
+def _returns(episodes: list[tuple[list[dict], float]], graded: bool) -> list[tuple[list[dict], float, bool]]:
+    """(calls, n-step return, complete) per episode: r_i + g r_(i+1) + ... over the next
+    NSTEP - 1 episodes of the trial. Complete when those episodes have closed, or the trial is
+    over (graded: its final episode is the last); an incomplete return is the sum so far."""
+    rewards = [r for _, r in episodes]
+    out = []
+    for i, (calls, _) in enumerate(episodes):
+        ahead = rewards[i:i + NSTEP]
+        g = sum(GAMMA ** k * r for k, r in enumerate(ahead))
+        out.append((calls, g, graded or len(ahead) == NSTEP))
     return out
 
 
@@ -219,6 +502,7 @@ def _seq_len(seg: list[dict]) -> int:
 def _eligible(consumed: set[str], step: int) -> list[tuple[list[dict], float]]:
     """Unconsumed (segment, reward) pairs from closed episodes, oldest first, for trainer step `step`."""
     directions = _directions()
+    timeline = _sota_timeline(directions) if REWARD == "sota" else {}
     out: list[tuple[list[dict], float]] = []
     for f in sorted(SPOOL_DIR.glob("*.jsonl")):
         trial = f.stem
@@ -233,11 +517,31 @@ def _eligible(consumed: set[str], step: int) -> list[tuple[list[dict], float]]:
                 records.append(json.loads(line))
             except Exception:
                 continue  # a partially written last line
-        final = _final_reward(trial)
-        episodes = _closed_episodes(records, direction == "lower", final)
+        if any(r.get("capture_gap") for r in records):
+            continue  # the forwarder lost calls of this trial: its rewards would be mis-assigned
+        board = _leaderboard(_competition(trial))
+        final = _final_reward(trial, board, direction == "lower")
+        episodes = _closed_episodes(records, direction == "lower", final, board,
+                                    _final_val(trial) if final is not None else None,
+                                    final is not None and ITER_CAP_REWARD is not None and _hit_limit(trial),
+                                    final is not None and QUIT_REWARD is not None and _quit_early(trial, records),
+                                    final is not None and INVALID_REWARD is not None and _invalid_final(trial),
+                                    timeline.get(_competition(trial)))
+        if MAX_EPISODE > 0:
+            # validate episodes only (no final episode), the first MAX_EPISODE of them
+            episodes = _closed_episodes(records, direction == "lower", None, board,
+                                        sota=timeline.get(_competition(trial)))[:MAX_EPISODE]
+            final = None
         if final is not None and episodes:
             _FINAL_IDS.update(c["id"] for c in episodes[-1][0])
-        for calls, reward in episodes:
+        for (calls, reward, complete), (_, own) in zip(_returns(episodes, final is not None), episodes):
+            steps = [c["weight_version"] for c in calls if c.get("weight_version") is not None]
+            if not complete:
+                # Waiting for the next episode's reward. Released with the sum so far on its
+                # last step before going stale, rather than dropped (no limit: it waits).
+                if not (MAX_STALENESS and steps and step - min(steps) >= int(MAX_STALENESS)):
+                    continue
+            _STATS[calls[0]["id"]] = {"reward": own, "calls": len(calls), "partial": not complete}
             for seg in _segments(calls):
                 if seg[0]["id"] in consumed:
                     continue
@@ -305,7 +609,64 @@ def _to_sample(seg: list[dict], reward: float, rollout_id: int, index: int):
     )
 
 
-_SUMMARY_CACHE: dict[str, tuple[int, list[dict]]] = {}  # spool file -> (bytes read, call summaries)
+_SUMMARY_CACHE: dict[str, tuple[int, list[dict]]] = {}
+_EVENT_CACHE: dict[str, tuple[int, list[tuple[float, float]], set]] = {}  # spool file -> (bytes read, [(ts, mean validate score)], raw scores seen)
+
+
+def _validate_events(f: Path) -> list[tuple[float, float]]:
+    """(ts, mean score) of each call that observed validate scores; read incrementally."""
+    offset, evs, seen_raw = _EVENT_CACHE.get(str(f), (0, [], set()))
+    if f.stat().st_size > offset:
+        with open(f, "rb") as fh:
+            fh.seek(offset)
+            chunk = fh.read()
+        end = chunk.rfind(b"\n") + 1
+        for line in chunk[:end].splitlines():
+            if b'"observed_validate_scores": []' in line or b"observed_validate_scores" not in line:
+                continue
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            raw = r.get("observed_validate_scores") or []
+            if all(x in seen_raw for x in raw):
+                continue  # the same result shown again, not a new validate
+            seen_raw.update(raw)
+            seen = [x for x in (_to_score(v) for v in raw) if x is not None]
+            if seen and r.get("ts") is not None:
+                evs.append((float(r["ts"]), sum(seen) / len(seen)))
+        _EVENT_CACHE[str(f)] = (offset + end, evs, seen_raw)
+    return evs
+
+
+def _sota_timeline(directions: dict) -> dict[str, tuple[list[float], list[float]]]:
+    """Per competition: event times (sorted) and the running best validate percentile after each."""
+    by_comp: dict[str, list[tuple[float, float]]] = {}
+    for f in SPOOL_DIR.glob("*.jsonl"):
+        if not _wanted(f.stem):
+            continue
+        comp = _competition(f.stem)
+        if directions.get(comp) is None:
+            continue
+        evs = sorted(_validate_events(f))
+        if MAX_EPISODE > 0:
+            evs = evs[:MAX_EPISODE]  # the record counts only the episodes that are trained on
+        by_comp.setdefault(comp, []).extend(evs)
+    out = {}
+    for comp, evs in by_comp.items():
+        board = _leaderboard(comp)
+        if not board:
+            continue
+        lower = directions[comp] == "lower"
+        evs.sort()
+        ts, best, cur = [], [], None
+        for t, sc in evs:
+            q = _percentile(board, sc, lower)
+            cur = q if cur is None else max(cur, q)
+            ts.append(t)
+            best.append(cur)
+        out[comp] = (ts, best)
+    return out  # spool file -> (bytes read, call summaries)
 
 
 def _call_summaries() -> dict[str, list[dict]]:
@@ -325,6 +686,8 @@ def _call_summaries() -> dict[str, list[dict]]:
                 try:
                     r = json.loads(line)
                 except Exception:
+                    continue
+                if r.get("capture_gap"):
                     continue
                 recs.append({"weight_version": r.get("weight_version"), "validate": bool(r.get("calls_validate")),
                              "scored": bool(r.get("observed_validate_scores")),
@@ -355,12 +718,12 @@ def _watchdog(step: int) -> dict:
         stats["scored"] += sum(r["scored"] for r in mine)
         stats["over_8k"] += sum(r["response_len"] > 8192 for r in mine)
         stats["truncated"] += sum(r["truncated"] for r in mine)
-        reward = _final_reward(trial)
-        if reward is not None and len(mine) == len(recs):  # finished, and entirely on these weights
+        grade = _grade(trial)
+        if grade is not None and len(mine) == len(recs):  # finished, and entirely on these weights
             calls_by_trial[trial] = len(recs)
             graded += 1
-            valid += reward > 0
-            medal += reward > VALID_REWARD
+            valid += _valid(grade)
+            medal += (grade.get("medal") or "none") != "none"
     n = max(stats["calls"], 1)
     lengths = sorted(calls_by_trial.values())
     out = {
@@ -387,6 +750,19 @@ def _watchdog(step: int) -> dict:
     if alarms:
         _log(f"WATCHDOG step {step} (weights of step {newest}): " + "; ".join(alarms))
     return out
+
+
+def _episode_metrics(batch) -> dict:
+    """Own reward (before the n-step return), length and budget of the batch's episodes."""
+    eps = {_EPISODE_OF.get(seg[0]["id"], seg[0]["id"]) for seg, _ in batch}
+    st = [_STATS[e] for e in eps if e in _STATS]
+    n = max(len(st), 1)
+    return {
+        "batch/own_reward": sum(x["reward"] for x in st) / n,
+        "batch/episode_calls_mean": sum(x["calls"] for x in st) / n,
+        "batch/over_budget_frac": sum(EPISODE_BUDGET > 0 and x["calls"] > EPISODE_BUDGET for x in st) / n,
+        "batch/nstep_partial_frac": sum(x["partial"] for x in st) / n,
+    }
 
 
 def _select(ready: list, need: int, max_final: int) -> list | None:
@@ -462,7 +838,12 @@ def generate_rollout(args, rollout_id, data_source, evaluation=False):
         "batch/validate_episode_reward": sum(validate_eps) / max(len(validate_eps), 1),
         "batch/final_episode_reward": sum(final_eps) / max(len(final_eps), 1),
         "batch/truncated_calls": truncated,
+        "batch/truncated_episode_frac": len({episode_ids[_EPISODE_OF.get(seg[0]["id"], seg[0]["id"])]
+                                             for seg, _ in batch
+                                             if any(c.get("finish_reason") == "length" for c in seg)})
+                                        / max(len(by_episode), 1),
         "batch/staleness_max": int(rollout_id) - min(s for s in steps if s is not None),
+        **_episode_metrics(batch),
         **(_watchdog(int(rollout_id)) if WATCHDOG else {}),
     }
     from miles.rollout.base_types import RolloutFnTrainOutput
