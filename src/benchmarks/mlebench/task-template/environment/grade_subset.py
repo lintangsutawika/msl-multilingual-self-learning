@@ -45,7 +45,18 @@ def _subset(sub: pd.DataFrame, ans) -> pd.DataFrame:
     m = s.isin(keep)
     if not m.any():  # one answer row per several submission rows: tensorflow2-qa's <example_id>_short / _long
         m = s.str.rsplit("_", n=1).str[0].isin(keep)
-    return sub[m].reset_index(drop=True)
+        return sub[m].reset_index(drop=True)
+    sub = sub[m]
+    if isinstance(ans, pd.DataFrame):
+        # In the answers' row order, as MLE-bench's sample was: some graders pair rows by position (uw-madison decodes
+        # each predicted mask with the image size of the answer row at the same index). Key: the id, plus `class` when
+        # an id has one row per class (uw-madison) or per timestamp (smartphone's trips). Rows not in the answers keep
+        # their place at the end.
+        key = [col] + [c for c in ("class", "UnixTimeMillis") if c in sub.columns and c in ans.columns]
+        rank = {k: i for i, k in enumerate(ans[key].astype(str).itertuples(index=False, name=None))}
+        order = sub[key].astype(str).apply(tuple, axis=1).map(rank)
+        sub = sub.assign(_o=order.fillna(len(rank)).to_numpy()).sort_values("_o", kind="stable").drop(columns="_o")
+    return sub.reset_index(drop=True)
 
 
 def grade(submission_csv: str, comp_id: str, answers_dir: str) -> float:

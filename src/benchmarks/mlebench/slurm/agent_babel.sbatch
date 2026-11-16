@@ -16,7 +16,7 @@
 #   sbatch --export=ALL,TASKS=/path/task src/benchmarks/mlebench/slurm/agent_babel.sbatch
 #   # every task of a dir, one array element each. Preempted elements requeue and resume by themselves; after a
 #   # cancel, time limit or crash, resubmit the same command: finished attempts are kept, done tasks skipped:
-#   T=/data/user_data/jeffc2/datasets/mlebench-babel/mlebench-low
+#   T=/path/to/tasks/mlebench-low
 #   sbatch --array=0-$(($(ls -d $T/*/ | wc -l) - 1)) --export=ALL,TASKS_DIR=$T,SWEEP_NAME=qwen3.5-9b-k4 \
 #       src/benchmarks/mlebench/slurm/agent_babel.sbatch
 #
@@ -24,7 +24,11 @@
 #      remove task dirs there while the array runs, or a requeued element picks another task);
 #      MODEL (default Qwen/Qwen3.5-9B); N_ATTEMPTS (4, run at once); SWEEP_NAME (default agent; jobs go to
 #      <task parent>/../sweeps/<SWEEP_NAME>); MAX_GEN_TOKENS (16384), MAX_ITERATIONS (200),
-#      CONDENSER_MAX_EVENTS (120), TERMINAL_MAX_TIMEOUT (1800): as in scripts/rollout.sh.
+#      CONDENSER_MAX_EVENTS (120), TERMINAL_MAX_TIMEOUT (1800): as in scripts/rollout.sh;
+#      HARBOR_EXTRA_ARGS (extra `harbor run` flags, e.g. --agent-timeout-multiplier 2 for 8 h attempts);
+#      VLLM_CUDA_SIF, CACHE_DIR, GRADER_PY: site paths, from src/benchmarks/mlebench/site.env (see site.env.example).
+# Submit from the repo root (logs go to logs/). --account/--partition/--qos on the sbatch command line override the
+# defaults below.
 #SBATCH --job-name=mlebench-agent
 #SBATCH --account=teruko
 #SBATCH --partition=preempt
@@ -51,8 +55,9 @@ N_ATTEMPTS="${N_ATTEMPTS:-4}"
 MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-16384}"
 TAG="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-$$}}_${SLURM_ARRAY_TASK_ID:-0}"
 PORT="${PORT:-$((20000 + $(printf '%s' "$TAG" | cksum | cut -d' ' -f1) % 20000))}"
-export VLLM_CUDA_SIF="${VLLM_CUDA_SIF:-/data/user_data/jeffc2/containers/vllm-openai-v0.31.0.sif}"
-export CACHE_DIR="${CACHE_DIR:-/data/user_data/jeffc2/.cache}"
+[ -f src/benchmarks/mlebench/site.env ] && . src/benchmarks/mlebench/site.env  # site paths (site.env.example)
+: "${VLLM_CUDA_SIF:?set VLLM_CUDA_SIF (src/benchmarks/mlebench/site.env.example)}" "${CACHE_DIR:?set CACHE_DIR}"
+export VLLM_CUDA_SIF CACHE_DIR
 FIRST=${TASKS%% *}
 export JOBS_DIR="${JOBS_DIR:-$(dirname "$(dirname "$FIRST")")/sweeps/${SWEEP_NAME}}"
 mkdir -p "$JOBS_DIR"
@@ -106,6 +111,6 @@ AGENT="${AGENT:-src.rollout.openhands_agent:CondensingOpenHandsSDK}" JOB_PREFIX=
 AGENT_ARGS="-m litellm_proxy/${MODEL} --ae LLM_API_KEY=EMPTY --ae LLM_BASE_URL=http://127.0.0.1:${PORT}/v1
   --ae LLM_MODEL=litellm_proxy/${MODEL} --ae MAX_ITERATIONS=${MAX_ITERATIONS:-200}
   --ae CONDENSER_MAX_EVENTS=${CONDENSER_MAX_EVENTS:-120} --ae TERMINAL_MAX_TIMEOUT=${TERMINAL_MAX_TIMEOUT:-1800}
-  --max-retries 3 --retry-include NetworkConnectionError" \
+  --max-retries 3 --retry-include NetworkConnectionError ${HARBOR_EXTRA_ARGS:-}" \
   src/benchmarks/mlebench/run_babel.sh "${todo[@]}"
 log "finished rc=$?"

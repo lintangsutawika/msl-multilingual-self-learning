@@ -1,27 +1,16 @@
-"""CLI for generating MLE-Bench Harbor tasks from the shared template.
+"""CLI for generating MLE-Bench Harbor tasks from the shared template (task-template/).
 
-Each task gets its competition's prepared data baked in (environment/{public,private,
-leaderboard.csv}). Data comes from the mlebench cache (~/.cache/mle-bench/data);
---prepare downloads and prepares missing competitions first (needs Kaggle credentials,
-e.g. KAGGLE_CONFIG_DIR=~/.kaggle). Run on the login node; it is CPU/network only.
+The competition's data must be prepared first (prepare_queue.py, under the grader venv) and, for --val-split, split
+(valsplit.py). See README.md in this directory for the whole pipeline. Two kinds of task:
 
-Examples:
-    # The 8 low-complexity comps the loop uses (prepare + bake)
-    C=tabular-playground-series-may-2022,tabular-playground-series-dec-2021,spooky-author-identification
-    C=$C,random-acts-of-pizza,new-york-city-taxi-fare-prediction,leaf-classification
-    C=$C,denoising-dirty-documents,plant-pathology-2020-fgvc7
-    uv run python -m src.benchmarks.mlebench --prepare --competition $C
+    # Babel / Singularity: data mounted read-only at run time, answers kept out of the image (run with run_babel.sh)
+    uv run python -m src.benchmarks.mlebench --competition spooky-author-identification --val-split --mount-data \
+        --output /path/to/tasks
 
-    # Prepared benchmark sets
-    uv run python -m src.benchmarks.mlebench --splits low
-    uv run python -m src.benchmarks.mlebench --splits low,medium,high
-    uv run python -m src.benchmarks.mlebench --all
+    # SAIL / Docker: prepared data baked into each task's image
+    uv run python -m src.benchmarks.mlebench --splits low --val-split --output /path/to/tasks
 
-    # Single competition
-    uv run python -m src.benchmarks.mlebench --competition nomad2018-predict-transparent-conductors
-
-    # Custom output dir
-    uv run python -m src.benchmarks.mlebench --splits low --output /tmp/mlebench-tasks
+    # Selecting competitions: --competition a,b | --splits low,medium,high | --all
 """
 
 from __future__ import annotations

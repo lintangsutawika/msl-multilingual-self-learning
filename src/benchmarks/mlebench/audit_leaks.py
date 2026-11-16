@@ -1,7 +1,7 @@
 """Leak audit of MLE-bench validation splits: can the agent find any answer (MLE-bench test or our validation) in
 what it sees (valsplit/public, mounted at /workspace/public)?
 
-    python -m src.benchmarks.mlebench.audit_leaks [--competition a,b]   # default: every competition with a split
+    $GRADER_PY -m src.benchmarks.mlebench.audit_leaks [--competition a,b]   # default: every competition with a split
 
 For each competition, with A = answer columns (private answers minus the id column) and ids = test + validation ids:
   * table files (csv, json, csv/json inside zips): rows whose id is in ids may not carry any column of A with
@@ -59,7 +59,11 @@ def _tables(p: Path):
         if name.endswith(".csv"):
             return pd.read_csv(fh, dtype=str, keep_default_na=False)
         if name.endswith(".json"):
-            data = json.load(fh)
+            text = fh.read()
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:  # JSON lines named .json (stanford-covid)
+                data = [json.loads(line) for line in text.splitlines() if line.strip()]
             return pd.DataFrame(data) if isinstance(data, list) else None
         return None
     if p.suffix in (".csv", ".json"):
@@ -139,7 +143,7 @@ def audit(cid: str) -> list[str]:
         if not p.is_file() or p.suffix in SKIP_SUFFIXES:
             continue
         rel = p.relative_to(pub)
-        test_side = rel.parts[0] in spec.test_side
+        test_side = any(rel.as_posix() == e or rel.as_posix().startswith(e + "/") for e in spec.test_side)  # nested ok
         if p.suffix == ".jsonl" and test_side:
             mine = comp.public_dir / rel
             allowed = set(json.loads(mine.open().readline())) if mine.exists() else set()
@@ -163,6 +167,11 @@ def audit(cid: str) -> list[str]:
             continue
         if p.suffix in (".csv", ".json", ".zip"):
             for name, df in _tables(p):
+                if spec.json_id and spec.json_id in df.columns and not test_side:  # records keyed by file id
+                    hit = set(df[spec.json_id].astype(str)) & file_ids
+                    if hit:
+                        problems.append(f"{rel} ({name}): train-side records of test/validation ids, e.g. "
+                                        f"{sorted(hit)[:3]}")
                 if id_col not in df.columns:
                     continue
                 if "sample" in p.name.lower() and cid.startswith("text-normalization"):
@@ -175,8 +184,15 @@ def audit(cid: str) -> list[str]:
                 if len(rows) and leaked:
                     problems.append(f"{rel} ({name}): {len(rows)} test/validation rows carry answer columns {leaked}")
             continue
+        if cid == "herbarium-2020-fgvc7" and rel.parts[:2] == ("nybg2020", "train"):
+            continue  # train images keep Kaggle's image ids, test ids are renumbered 0..: names can't leak; see below
         if not test_side and (p.stem in file_ids or p.stem.split("_")[0] in file_ids and spec.file_id):
             problems.append(f"{rel}: train-side file named after a test/validation id")
+    if cid == "herbarium-2020-fgvc7":  # validation images are hardlinks of MLE-bench's train files: by inode instead
+        test_inodes = {q.stat().st_ino for q in (pub / "nybg2020/test/images").rglob("*.jpg")}
+        shared = [q for q in (pub / "nybg2020/train/images").rglob("*.jpg") if q.stat().st_ino in test_inodes]
+        if shared:
+            problems.append(f"{len(shared)} train' images are test/validation images, e.g. {shared[0].relative_to(pub)}")
     if cid == "nomad2018-predict-transparent-conductors":  # content: no test/validation material's inputs in train
         train = pd.read_csv(pub / "train.csv", dtype=str)
         test = pd.read_csv(pub / "test.csv", dtype=str)

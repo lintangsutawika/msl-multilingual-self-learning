@@ -279,3 +279,6 @@ wandb/
 
 # Generated MLE-Bench Harbor task templates (build output)
 harbor_tasks/
+
+# MLE-bench site settings (paths on one cluster; see src/benchmarks/mlebench/site.env.example)
+src/benchmarks/mlebench/site.env

@@ -12,7 +12,7 @@
 #
 # Env: AGENT (default oracle; e.g. src.rollout.openhands_agent:CondensingOpenHandsSDK), JOBS_DIR (default
 #      <task parent>/../jobs), JOB_PREFIX (default mlebench), N_ATTEMPTS (default 1),
-#      GRADER_PY (host grader's python), RESUME=1 (fixed job names; resume an existing job, see below),
+#      GRADER_PY (host grader's python; or in site.env), RESUME=1 (fixed job names; resume an existing job, see below),
 #      RESUME_LLM_BASE_URL, RESUME_LLM_API_KEY (on resume: the agent's new LLM_BASE_URL, and its API key, which Harbor
 #      saves masked),
 #      AGENT_ARGS (extra harbor args, e.g. --ae LLM_BASE_URL=... -m ...), SCRATCH (default /scratch/$USER/hsh).
@@ -22,7 +22,9 @@ HARBOR=.venv/bin/harbor
 AGENT=${AGENT:-oracle}
 SCRATCH=${SCRATCH:-/scratch/$USER/hsh}
 mkdir -p "$SCRATCH/sandbox" "$SCRATCH/images" "$SCRATCH/tmp" "$SCRATCH/validate"
-GRADER_PY=${GRADER_PY:-/data/user_data/jeffc2/mlebench-grader-venv/bin/python}  # mlebench rev + pandas<3, as in the image
+# Site paths (GRADER_PY: the grader venv's python, mlebench rev + pandas<3 as in the image): site.env.example.
+[ -f src/benchmarks/mlebench/site.env ] && . src/benchmarks/mlebench/site.env
+: "${GRADER_PY:?set GRADER_PY (src/benchmarks/mlebench/site.env.example)}"
 export SINGULARITY_TMPDIR="$SCRATCH/tmp" APPTAINER_TMPDIR="$SCRATCH/tmp"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 rc=0

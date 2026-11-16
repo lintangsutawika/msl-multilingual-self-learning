@@ -29,6 +29,8 @@ shutil.copy(sys.argv[3], comp.leaderboard)
 PY
 WORKDIR=$(mktemp -d)
 trap 'rm -rf "$WORKDIR"' EXIT
+# Keep the agent's final predictions (gzipped) next to the grade, so a grading fix can regrade without rerunning.
+[ -f "$SUBMISSION" ] && gzip -c "$SUBMISSION" > /logs/verifier/predictions.csv.gz || true
 # Validation split (src/benchmarks/mlebench/valsplit.py): predictions.csv also covers the validation rows; grade only
 # MLE-bench's test rows, so the final score is MLE-bench's.
 if [ -f /workspace/private_val/valsplit.json ] && [ -f "$SUBMISSION" ]; then

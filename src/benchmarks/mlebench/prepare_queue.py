@@ -1,6 +1,10 @@
 """Prepare as many MLE-bench competitions as the disk allows: by split (low, medium, high), smallest download first.
 
-    python -m src.benchmarks.mlebench.prepare_queue [--splits low,medium,high] [--reserve-gb 200] [--delete-zips]
+    $GRADER_PY -m src.benchmarks.mlebench.prepare_queue [--splits low,medium,high | --competition a,b]
+        [--reserve-gb 200] [--delete-zips]
+
+Run it with the grader venv (setup_grader_venv.sh): MLE-bench's prepare.py scripts break under pandas 3. Needs Kaggle
+credentials (KAGGLE_CONFIG_DIR) and each competition's rules accepted on kaggle.com.
 
 For each competition that isn't prepared yet: look up its Kaggle download size, skip it if preparing it could leave
 less than --reserve-gb free (estimate: 3x the download, for the zip, the extraction and the prepared copy), else
@@ -21,6 +25,7 @@ from mlebench.data import is_dataset_prepared
 from mlebench.registry import registry
 
 from .adapter import prepare
+from .valsplit import require_pandas2
 
 
 def _kaggle_bytes(api, cid: str) -> int | None:
@@ -38,9 +43,11 @@ def _kaggle_bytes(api, cid: str) -> int | None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--splits", default="low,medium,high")
+    ap.add_argument("--competition", help="comma-separated ids: prepare just these (instead of --splits)")
     ap.add_argument("--reserve-gb", type=float, default=200.0)
     ap.add_argument("--delete-zips", action="store_true", help="remove Kaggle's zip and raw/ after preparing")
     a = ap.parse_args()
+    require_pandas2()
     from kaggle.api.kaggle_api_extended import KaggleApi
 
     api = KaggleApi()
@@ -52,9 +59,15 @@ def main() -> None:
         for line in status.read_text().splitlines()[1:]:
             rows[line.split("\t")[0]] = line
     splits_dir = registry.get_splits_dir()
+    groups = {s: (splits_dir / f"{s}.txt").read_text().split() for s in a.splits.split(",")}
+    if a.competition:
+        level = {c: s for s in ("low", "medium", "high") for c in (splits_dir / f"{s}.txt").read_text().split()}
+        groups = {}
+        for c in a.competition.split(","):
+            groups.setdefault(level.get(c.strip(), "other"), []).append(c.strip())
     order = []
-    for s in a.splits.split(","):
-        ids = [c for c in (splits_dir / f"{s}.txt").read_text().split() if c not in {c2 for _, c2, _ in order}]
+    for s, group in groups.items():
+        ids = [c for c in group if c not in {c2 for _, c2, _ in order}]
         todo = [c for c in ids if not is_dataset_prepared(registry.get_competition(c))]
         sized = sorted((_kaggle_bytes(api, c) or float("inf"), c) for c in todo)
         order += [(s, c, b) for b, c in sized]

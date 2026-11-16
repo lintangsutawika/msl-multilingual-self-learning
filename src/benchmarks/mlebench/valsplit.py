@@ -10,7 +10,9 @@ As in the MLE-Dojo tasks, the agent sees ONE test set and writes ONE predictions
 shuffled into the test inputs (both come from Kaggle's train, so they can't be told apart). `validate` scores only the
 validation ids (answers in private_val/), the final grade only MLE-bench's test ids (private/).
 
-    python -m src.benchmarks.mlebench.valsplit --competition spooky-author-identification[,...] [--force]
+    $GRADER_PY -m src.benchmarks.mlebench.valsplit --competition spooky-author-identification[,...] [--force]
+
+Run it with the grader venv (setup_grader_venv.sh: pandas<3): MLE-bench's prepare.py scripts break under pandas 3.
 
 Writes <mlebench data>/<cid>/valsplit/{public,private_val} next to MLE-bench's prepared/ (private/ stays prepared/private).
 Files are hardlinked from prepared/ where unchanged. Never writes into prepared/: prepare.py only ever sees a scratch
@@ -59,7 +61,10 @@ class Spec:
     test_side: list[str] = field(default_factory=list)
     # how a file is named from an answer id: None = the id itself; "image" = the part before the first "_"
     # (denoising's answers are pixels "<image>_<row>_<col>", its files <image>.png); "trip" = all but the last "-"
-    # part (smartphone's answers are trips "<drive>-<phone>", its test folders <drive>/<phone>/)
+    # part (smartphone's answers are trips "<drive>-<phone>", its test folders <drive>/<phone>/); "seqpos" = all but the
+    # last "_" part (stanford-covid's answers are "<id>_<position>"); "caseday" = the first two "_" parts (uw-madison's
+    # answers are "<case>_<day>_slice_<n>", its folders <case>/<case>_<day>/); "nfl" = the game play's three videos
+    # (answers "<game>_<play>_<step>_<p1>_<p2>", videos "<game>_<play>_{All29,Endzone,Sideline}.mp4")
     file_id: str | None = None
     # name of a PREPARES function used instead of MLE-bench's prepare.py, for competitions whose prepare.py has no
     # split to repeat (MLE-bench used Kaggle's own labelled test set)
@@ -67,10 +72,19 @@ class Spec:
     # MLE-bench public files (globs) that are test-side but live in a directory prepare.py rewrites: linked back in
     # after the merge (siim's tfrecords/test*.tfrec)
     keep_test: list[str] = field(default_factory=list)
+    # key of the record id in JSON / JSON-lines files, when it isn't the answers' id column (stanford-covid: records
+    # "id", answers "<id>_<position>"): the leak check looks for validation records by it (through file_id)
+    json_id: str | None = None
+    # public entries prepare.py rewrites but MLE-bench's version is kept (hubmap's dataset information lists every
+    # slide, MLE-bench's test slides included; prepare.py would keep only train')
+    keep_public: list[str] = field(default_factory=list)
     # name of a CUSTOM function that builds the whole split (mlsp-2013-birds: ids are woven through a dozen files)
     custom: str | None = None
     # name of a POSTS function run on the finished public/ (siim: strip labels MLE-bench left in test files)
     post: str | None = None
+    # test-side dirs that hold ONLY test files in MLE-bench's public (hms' test_spectrograms/, named by a second id):
+    # merged whole instead of picking MLE-bench's files by answer id
+    whole_test: list[str] = field(default_factory=list)
 
 
 # Competitions whose prepare.py keeps the original ids (no renumbering), so validation and test ids can't collide.
@@ -174,6 +188,75 @@ SPECS: dict[str, Spec] = {
                                                 "competition_data/train/images": "train/images",
                                                 "competition_data/train/masks": "train/masks"}},
         test_side=["test", "sample_submission.csv"]),
+    "bms-molecular-translation": Spec(  # images nested by id: train/a/b/c/abc....png
+        raw={n: n for n in ("train_labels.csv", "train", "extra_approved_InChIs.csv")},
+        test_side=["test", "sample_submission.csv"]),
+    "rsna-miccai-brain-tumor-radiogenomic-classification": Spec(  # one folder of scans per patient id
+        raw={"train_labels.csv": "train_labels.csv", "train": "train"}, test_side=["test", "sample_submission.csv"]),
+    "hotel-id-2021-fgvc8": Spec(raw={"train.csv": "train.csv", "train_images": "train_images"},
+                                test_side=["test_images", "sample_submission.csv"]),
+    "plant-pathology-2021-fgvc8": Spec(raw={"train.csv": "train.csv", "train_images": "train_images"},
+                                       test_side=["test_images", "sample_submission.csv"]),
+    "alaska2-image-steganalysis": Spec(raw={d: d for d in ("Cover", "JMiPOD", "JUNIWARD", "UERD")},
+                                       remap="alaska2", test_side=["Test", "sample_submission.csv"]),
+    "hubmap-kidney-segmentation": Spec(
+        raw={n: n for n in ("train.csv", "HuBMAP-20-dataset_information.csv", "train")}, prepare="hubmap",
+        keep_public=["HuBMAP-20-dataset_information.csv"], post="hubmap", test_side=["test", "sample_submission.csv"]),
+    # one image of each whale seen twice goes to test (unseen test whales become new_whale), as MLE-bench did; a lone
+    # image of a whale MLE-bench's test asks for stays in train' (prepare="whale")
+    "whale-categorization-playground": Spec(raw={"train.csv": "train.csv", "train": "train"}, prepare="whale",
+                                            test_side=["test", "sample_submission.csv"]),
+    # MLE-bench graded Kaggle's released test labels (no split to repeat): own 10% splits of train (prepare=...)
+    "jigsaw-unintended-bias-in-toxicity-classification": Spec(raw={"train.csv": "train.csv"}, prepare="jigsaw_ub",
+                                                              test_side=["test.csv", "sample_submission.csv"]),
+    "freesound-audio-tagging-2019": Spec(
+        raw={n: n for n in ("train_curated.csv", "train_curated.zip", "sample_submission.csv")}, prepare="freesound",
+        test_side=["test.zip", "sample_submission.csv"]),
+    # test_v2.txt.zip is written whole by the prepare (MLE-bench's test rows + validation rows), so not test_side
+    "billion-word-imputation": Spec(raw={n: n for n in ("train_v2.txt.zip", "test_v2.txt.zip")}, prepare="billion"),
+    # time split: the week before MLE-bench's test week is validation (customer ids get "_val", remap="hm")
+    "h-and-m-personalized-fashion-recommendations": Spec(
+        raw={n: n for n in ("transactions_train.csv", "articles.csv", "customers.csv", "images",
+                            "sample_submission.csv")}, remap="hm", test_side=["sample_submission.csv"]),
+    # MLE-bench's test = Kaggle's training4 archive; validation = training3 (prepare="gesture")
+    "multi-modal-gesture-recognition": Spec(
+        raw={"training.csv": "training.csv", "training3.tar.gz": "training3.tar.gz"}, prepare="gesture",
+        post="gesture", test_side=["test.csv", "randomPredictions.csv", "test.tar.gz"]),
+    "nfl-player-contact-detection": Spec(  # by game play, as MLE-bench
+        raw={n: n for n in ("train_labels.csv", "train_baseline_helmets.csv", "train_player_tracking.csv",
+                            "train_video_metadata.csv", "train")}, file_id="nfl",
+        test_side=["test", "test_baseline_helmets.csv", "test_player_tracking.csv", "test_video_metadata.csv",
+                   "sample_submission.csv"]),
+    "uw-madison-gi-tract-image-segmentation": Spec(  # by case, as MLE-bench
+        raw={"train.csv": "train.csv", "train": "train"}, file_id="caseday",
+        test_side=["test", "test.csv", "sample_submission.csv"]),
+    "imet-2020-fgvc7": Spec(raw={n: n for n in ("train.csv", "labels.csv", "train")},
+                            test_side=["test", "sample_submission.csv"]),
+    "cdiscount-image-classification-challenge": Spec(  # prepare.py re-filters train.bson (~56 GB) three times
+        raw={n: n for n in ("train.bson", "train_example.bson", "category_names.csv")},
+        test_side=["test.bson", "sample_submission.csv"]),
+    "herbarium-2020-fgvc7": Spec(custom="herbarium",  # test images renumbered: see _make_herbarium
+                                 test_side=["nybg2020/test", "sample_submission.csv"]),  # (for the audit)
+    "hms-harmful-brain-activity-classification": Spec(  # by spectrogram_id, as MLE-bench
+        raw={n: n for n in ("train.csv", "example_figures", "train_eegs", "train_spectrograms")},
+        test_side=["test.csv", "sample_submission.csv", "test_eegs", "test_spectrograms"],
+        whole_test=["test_eegs", "test_spectrograms"]),
+    # MLE-bench's test = train fragment 3 ("a"); validation = fragment 2 ("b"), train' = fragment 1
+    "vesuvius-challenge-ink-detection": Spec(raw={"train": "train"}, prepare="vesuvius",
+                                             test_side=["test", "sample_submission.csv"]),
+    "iwildcam-2019-fgvc6": Spec(  # by camera location, as MLE-bench (prepare.py extracts train_images.zip itself)
+        raw={"train.csv": "train.csv", "train_images.zip": "train_images.zip"},
+        test_side=["test.csv", "test_images.zip", "sample_submission.csv"]),
+    "siim-covid19-detection": Spec(  # by study, as MLE-bench; answers "<study>_study" / "<image>_image",
+        raw={n: n for n in ("train_study_level.csv", "train_image_level.csv", "train")},  # files test/<study>/../<image>.dcm
+        file_id="seqpos", test_side=["test", "sample_submission.csv"]),
+    "iwildcam-2020-fgvc7": Spec(  # by camera location, as MLE-bench
+        raw={n: n for n in ("iwildcam2020_train_annotations.json", "iwildcam2020_test_information.json",
+                            "iwildcam2020_megadetector_results.json", "train")},
+        test_side=["test", "iwildcam2020_test_information.json", "sample_submission.csv"]),
+    "stanford-covid-vaccine": Spec(  # test.json is JSON lines; prepare.py reads its columns from raw test.json
+        raw={n: n for n in ("train.json", "test.json", "sample_submission.csv")}, remap="covid",
+        file_id="seqpos", json_id="id", test_side=["test.json", "sample_submission.csv"]),
 }
 
 
@@ -205,6 +288,15 @@ def _merge_csv(a: Path, b: Path, out: Path) -> None:
 
 def _merge_json(a: Path, b: Path, out: Path) -> None:
     la, lb = json.loads(a.read_text()), json.loads(b.read_text())
+    if isinstance(la, dict):  # COCO-style metadata (iwildcam-2020's test_information): concatenate the lists that
+        rows = {}             # differ (images), keep the rest (categories, info) as MLE-bench's
+        for k, v in la.items():
+            if isinstance(v, list) and v != lb.get(k):
+                v = v + lb.get(k, [])
+                random.Random(SEED).shuffle(v)
+            rows[k] = v
+        out.write_text(json.dumps(rows))
+        return
     rows = la + lb
     random.Random(SEED).shuffle(rows)
     out.write_text(json.dumps(rows, indent=4))
@@ -266,17 +358,32 @@ def _file_ids(ids: set[str], spec: Spec) -> set[str]:
         return {i.split("_")[0] for i in ids}
     if spec.file_id == "trip":
         return {i.rsplit("-", 1)[0] for i in ids}
+    if spec.file_id == "seqpos":
+        return {i.rsplit("_", 1)[0] for i in ids}
+    if spec.file_id == "caseday":
+        return {"_".join(i.split("_")[:2]) for i in ids}
+    if spec.file_id == "nfl":
+        return {f"{'_'.join(i.split('_')[:2])}_{v}" for i in ids for v in ("All29", "Endzone", "Sideline")}
     return ids
 
 
 def _has_id(rel: Path, ids: set[str]) -> bool:
     """Is some part of the path (a folder or file, by name or name without suffix) one of the ids?"""
-    return any(q in ids or Path(q).stem in ids for q in rel.parts)
+    return any(q in ids or Path(q).stem in ids or q.split(".")[0] in ids or q.split("-")[0] in ids for q in rel.parts)
 
 
-def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str]) -> None:
+def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str], whole: bool = False) -> None:
     """MLE-bench's test entry `a` + validation entry `b` -> `out`."""
-    if a.is_dir():
+    if a.is_dir() and whole:
+        _link_tree(b, out)
+        for p in a.rglob("*"):
+            if p.is_file():
+                q = out / p.relative_to(a)
+                if q.exists():
+                    raise ValueError(f"{out.name}: validation file {q.relative_to(out)} collides with a test file")
+                q.parent.mkdir(parents=True, exist_ok=True)
+                os.link(p, q)
+    elif a.is_dir():
         # Everything prepare.py wrote (train' files of a shared dir like images/, and the validation files), plus
         # MLE-bench's test files, picked by id (an entry's first path part, without suffix, is its id).
         _link_tree(b, out)
@@ -291,15 +398,42 @@ def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str]) -> None:
     elif a.suffix == ".csv":
         _merge_csv(a, b, out)
     elif a.suffix == ".json":
-        _merge_json(a, b, out)
+        try:
+            _merge_json(a, b, out)
+        except json.JSONDecodeError:  # JSON lines named .json (stanford-covid)
+            _merge_lines(a, b, out)
     elif a.suffix == ".zip":
         _merge_zip(a, b, out, tmp)
     elif a.suffix == ".jsonl":
         _merge_lines(a, b, out)
     elif a.suffix == ".7z":
         _merge_7z(a, b, out, tmp)
+    elif a.name.endswith(".tar.gz"):
+        _merge_tar(a, b, out)
+    elif a.suffix == ".bson":  # a stream of documents (cdiscount's test.bson): concatenated
+        with open(out, "wb") as fo:
+            for src in (a, b):
+                with open(src, "rb") as fi:
+                    shutil.copyfileobj(fi, fo, 64 << 20)
     else:
         raise ValueError(f"don't know how to merge {a.name}")
+
+
+def _merge_tar(a: Path, b: Path, out: Path) -> None:
+    """tar.gz of files (multi-modal-gesture's Sample*.zip): union of members, light compression."""
+    import tarfile
+
+    seen = set()
+    with tarfile.open(out, "w:gz", compresslevel=1) as to:
+        for src in (a, b):
+            with tarfile.open(src) as ti:
+                for m in ti:
+                    if m.isdir():
+                        continue
+                    if m.name in seen:
+                        raise ValueError(f"{out.name}: validation file {m.name} collides with a test file")
+                    seen.add(m.name)
+                    to.addfile(m, ti.extractfile(m))
 
 
 # ---------------------------------------------------------------------------------------------------- id remaps
@@ -372,6 +506,29 @@ def _remap_cassava(pub, priv, ans_rel, test_ids):
             lambda s: f"ld_test{int(s[7:9]) + k:02d}{s[9:]}")
 
 
+def _remap_covid(pub, priv, ans_rel, test_ids):
+    """Ids are Kaggle's (kept); prepare.py numbers the test records' `index` 0..n-1: the validation records go after
+    MLE-bench's."""
+    from mlebench.registry import registry
+
+    m = sum(1 for _ in open(registry.get_competition("stanford-covid-vaccine").public_dir / "test.json"))
+    rows = [json.loads(line) for line in (pub / "test.json").read_text().splitlines()]
+    for r in rows:
+        r["index"] += m
+    (pub / "test.json").write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in rows))
+
+
+def _remap_alaska2(pub, priv, ans_rel, test_ids):
+    """prepare.py names test images 0001.jpg..5000.jpg (4 digits; train images 00001.jpg.. have 5): the validation
+    images go after MLE-bench's, 5001..9999, and the last one is 0000 (unused: prepare.py counts from 1), so every
+    test name keeps 4 digits and none equals a train name (10000.jpg would)."""
+    n = max(int(i[:-4]) for i in test_ids)
+    stem = lambda s: f"{int(s) + n if int(s) + n < 10000 else 0:04d}"
+    for path in (pub / "sample_submission.csv", priv / ans_rel):
+        _map_csv(path, "Id", lambda v: stem(v[:-4]) + ".jpg")
+    _rename(sorted((pub / "Test").glob("*.jpg")), stem)
+
+
 def _remap_speech(pub, priv, ans_rel, test_ids):
     """prepare.py names test clips clip_<8-digit index>.wav: the validation clips go after MLE-bench's."""
     n = 1 + max(int(i[5:13]) for i in test_ids)
@@ -406,9 +563,17 @@ def _remap_ventilator(pub, priv, ans_rel, test_ids):
         _map_csv(path, "id", f)
 
 
-REMAPS = {"siim": _remap_siim, "plant": _remap_plant, "nomad": _remap_nomad, "dogs_vs_cats": _remap_dogs_vs_cats,
+def _remap_hm(pub, priv, ans_rel, test_ids):
+    """h-and-m: validation and test answers are both keyed by customer_id (different weeks): validation rows become
+    <customer_id>_val."""
+    f = lambda v: f"{v}_val"
+    _map_csv(priv / ans_rel, "customer_id", f)
+    _map_csv(pub / "sample_submission.csv", "customer_id", f)
+
+
+REMAPS = {"hm": _remap_hm, "siim": _remap_siim, "plant": _remap_plant, "nomad": _remap_nomad, "dogs_vs_cats": _remap_dogs_vs_cats,
           "text_norm": _remap_text_norm, "ventilator": _remap_ventilator, "cassava": _remap_cassava,
-          "speech": _remap_speech}
+          "speech": _remap_speech, "covid": _remap_covid, "alaska2": _remap_alaska2}
 
 
 # ---------------------------------------------------------------------------------------------------- the split
@@ -426,6 +591,8 @@ def _link_instead_of_copy():
             try:
                 if not d.exists() and Path(src).is_file():
                     os.link(os.path.realpath(src), d)
+                    return str(d)
+                if d.exists() and os.path.samefile(src, d):  # copied twice (hotel-id lists some images twice)
                     return str(d)
             except OSError:
                 pass
@@ -464,7 +631,163 @@ def _prepare_jigsaw(raw: Path, public: Path, private: Path) -> None:
     val[["id", *JIGSAW_CLASSES]].to_csv(private / "test.csv", index=False)
 
 
-PREPARES = {"jigsaw": _prepare_jigsaw}
+def _prepare_hubmap(raw: Path, public: Path, private: Path) -> None:
+    """MLE-bench split Kaggle's 15 train slides 12 + 3 (train_test_split(train_size=12, test_size=3)): repeated on its
+    12 as 9 + 3, the same 3 held out."""
+    import sys
+
+    from mlebench.registry import registry
+    from sklearn.model_selection import train_test_split
+
+    fn = registry.get_competition("hubmap-kidney-segmentation").prepare_fn
+    mod = sys.modules[fn.__module__]
+    mod.train_test_split = lambda *a, **k: train_test_split(*a, **{**k, "train_size": 9})
+    try:
+        fn(raw, public, private)
+    finally:
+        mod.train_test_split = train_test_split
+
+
+def _prepare_whale(raw: Path, public: Path, private: Path) -> None:
+    """MLE-bench's whale split, except that a whale with a single train image that MLE-bench's test asks for keeps it
+    in train': its prepare.py sends a lone image to validation 10% of the time, which would leave that test whale
+    unlearnable. Those images sit out MLE-bench's split and are added to train' afterwards."""
+    from mlebench.registry import registry
+
+    comp = registry.get_competition("whale-categorization-playground")
+    train = _read_table(raw / "train.csv")
+    asked = set(_read_table(comp.answers)["Id"]) - {"new_whale"}
+    n = train["Id"].value_counts()
+    keep = train["Id"].isin([w for w in asked if n.get(w, 0) == 1])
+    raw2 = raw.parent / "raw_whale"
+    raw2.mkdir()
+    train[~keep].to_csv(raw2 / "train.csv", index=False)
+    (raw2 / "train").symlink_to((raw / "train").resolve(), target_is_directory=True)
+    comp.prepare_fn(raw2, public, private)
+    pd.concat([_read_table(public / "train.csv"), train[keep]]).to_csv(public / "train.csv", index=False)
+    for img in train.loc[keep, "Image"]:
+        os.link((raw / "train" / img).resolve(), public / "train" / img)
+    print(f"whale: {int(keep.sum())} lone train images of MLE-bench test whales kept in train'")
+
+
+def _prepare_jigsaw_ub(raw: Path, public: Path, private: Path) -> None:
+    """jigsaw-unintended: MLE-bench used Kaggle's released test labels; here its usual split (10%, random_state=0) of
+    train.csv. Answers in the layout of Kaggle's test_private_expanded.csv (train's `target` is its `toxicity`)."""
+    from sklearn.model_selection import train_test_split
+
+    train = _read_table(raw / "train.csv")
+    new_train, val = train_test_split(train, test_size=0.1, random_state=0)
+    new_train.to_csv(public / "train.csv", index=False)
+    val[["id", "comment_text"]].to_csv(public / "test.csv", index=False)
+    val[["id"]].assign(prediction=0.0).to_csv(public / "sample_submission.csv", index=False)
+    val.rename(columns={"target": "toxicity"}).to_csv(private / "test.csv", index=False)
+
+
+def _prepare_freesound(raw: Path, public: Path, private: Path) -> None:
+    """freesound-2019: MLE-bench used Kaggle's released test labels; here 10% (random_state=0) of the curated train
+    clips (the test clips are curated-quality too) become validation: train_curated.zip/.csv lose them, test.zip gets
+    them. train_noisy is untouched. Answers many-hot over the classes, as MLE-bench's."""
+    from sklearn.model_selection import train_test_split
+
+    cur = _read_table(raw / "train_curated.csv")
+    new_cur, val = train_test_split(cur, test_size=0.1, random_state=0)
+    new_cur.to_csv(public / "train_curated.csv", index=False)
+    held = set(val["fname"])
+    with zipfile.ZipFile(raw / "train_curated.zip") as zi, \
+            zipfile.ZipFile(public / "train_curated.zip", "w", zipfile.ZIP_STORED) as zt, \
+            zipfile.ZipFile(public / "test.zip", "w", zipfile.ZIP_STORED) as zv:
+        for info in zi.infolist():
+            if not info.is_dir():
+                (zv if info.filename in held else zt).writestr(info, zi.read(info))
+    classes = list(pd.read_csv(raw / "sample_submission.csv", nrows=0).columns[1:])
+    hot = pd.DataFrame([[f] + [int(c in set(l.split(","))) for c in classes] for f, l in zip(val["fname"], val["labels"])],
+                       columns=["fname", *classes])
+    hot.to_csv(private / "test.csv", index=False)
+    hot.assign(**{c: 0 for c in classes}).to_csv(public / "sample_submission.csv", index=False)  # as MLE-bench's
+
+
+def _prepare_billion(raw: Path, public: Path, private: Path) -> None:
+    """billion-word: MLE-bench's prepare.py run on its own train, except (1) the line count is counted, not Kaggle's
+    hardcoded 30301028 (its final assert would fail), and (2) validation ids follow MLE-bench's test ids (its ids
+    start at 0 again). Writes test_v2.txt.zip with MLE-bench's test rows + the validation rows (not merged later: it
+    is a .txt table), private/test.csv with the validation answers only."""
+    import numpy as np
+
+    rng = np.random.RandomState(0)
+    with zipfile.ZipFile(raw / "test_v2.txt.zip") as z:
+        test_txt = z.read("test_v2.txt").decode()
+    n_test = test_txt.count("\n") - 1  # header line
+    tmp = Path(tempfile.mkdtemp(dir=public.parent))
+    val_lines = []
+    with zipfile.ZipFile(raw / "train_v2.txt.zip") as z, z.open("train_v2.txt") as f, \
+            open(tmp / "train_v2.txt", "w") as tr, open(private / "test.csv", "w") as pv:
+        pv.write('"id","sentence"\n')
+        i = n_test
+        for raw_line in f:
+            sentence = raw_line.decode()
+            if rng.uniform() <= 0.01 and len(sentence.strip().split()) > 2:
+                s = sentence.strip().replace('"', '""')
+                words = s.split()
+                k = rng.randint(1, len(words) - 1)
+                pv.write(f'{i},"{s}"\n')
+                val_lines.append(f'{i},"{" ".join(words[:k] + words[k + 1:])}"\n')
+                i += 1
+            else:
+                tr.write(sentence)
+    with zipfile.ZipFile(public / "train_v2.txt.zip", "w", zipfile.ZIP_DEFLATED) as z:
+        z.write(tmp / "train_v2.txt", arcname="train_v2.txt")
+    rows = test_txt.splitlines(keepends=True)
+    with zipfile.ZipFile(public / "test_v2.txt.zip", "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("test_v2.txt", "".join(rows[:1] + rows[1:] + val_lines))
+    shutil.rmtree(tmp)
+    print(f"billion-word: {len(val_lines)} validation sentences, ids {n_test}..{n_test + len(val_lines) - 1}")
+
+
+def _prepare_gesture(raw: Path, public: Path, private: Path) -> None:
+    """multi-modal-gesture: MLE-bench held out the last training archive (training4) as test; repeated on its three:
+    training3's samples are validation (test.tar.gz, test.csv, randomPredictions.csv, answers), as its prepare.py
+    writes them. training3.tar.gz itself is removed from public/ (post="gesture")."""
+    import random
+    import tarfile
+
+    with tarfile.open(raw / "training3.tar.gz") as t:
+        val_ids = sorted(Path(m.name).stem[-4:] for m in t if m.name.endswith(".zip"))
+    tr = pd.read_csv(raw / "training.csv", dtype={"Id": str, "Sequence": str})
+    tr[~tr["Id"].isin(val_ids)].to_csv(public / "training.csv", index=False)
+    ans = tr[tr["Id"].isin(val_ids)]
+    assert len(ans) == len(val_ids), f"{len(ans)} labels for {len(val_ids)} training3 samples"
+    ans.to_csv(private / "test.csv", index=False)
+    pd.DataFrame({"Id": val_ids}).to_csv(public / "test.csv", index=False)
+    random.seed(0)
+    preds = [" ".join(str(x) for x in random.sample(range(1, 21), 20)) for _ in val_ids]
+    pd.DataFrame({"Id": val_ids, "Sequence": preds}).to_csv(public / "randomPredictions.csv", index=False)
+    os.link(raw / "training3.tar.gz", public / "test.tar.gz")
+
+
+def _prepare_vesuvius(raw: Path, public: Path, private: Path) -> None:
+    """vesuvius: MLE-bench held out the last of Kaggle's 3 train fragments (3) as test fragment "a"; repeated on its
+    two: fragment 2 is validation fragment "b", written as its prepare.py writes a test fragment (no ink labels, no
+    ir.png; answers = inklabels_rle.csv with the ir.png size)."""
+    from PIL import Image
+
+    frag = raw / "train" / "2"
+    _link_tree(raw / "train" / "1", public / "train" / "1")
+    rle = _read_table(frag / "inklabels_rle.csv")
+    assert len(rle) == 1, f"fragment 2: {len(rle)} RLE rows"
+    with Image.open(frag / "ir.png") as img:
+        width, height = img.size
+    rle = rle.assign(width=width, height=height, Id="b")
+    rle.to_csv(private / "inklabels_rle.csv", index=False)
+    for f in frag.rglob("*"):
+        if f.is_file() and f.name not in ("inklabels.png", "inklabels_rle.csv", "ir.png"):
+            q = public / "test" / "b" / f.relative_to(frag)
+            q.parent.mkdir(parents=True, exist_ok=True)
+            os.link(f.resolve(), q)
+    pd.DataFrame({"Id": ["b"], "Predicted": ["1 1 5 1"]}).to_csv(public / "sample_submission.csv", index=False)
+
+
+PREPARES = {"vesuvius": _prepare_vesuvius, "gesture": _prepare_gesture, "jigsaw": _prepare_jigsaw, "hubmap": _prepare_hubmap, "whale": _prepare_whale, "billion": _prepare_billion,
+            "jigsaw_ub": _prepare_jigsaw_ub, "freesound": _prepare_freesound}
 
 
 def _strip_tfrecord_labels(pub: Path, pattern: str = "tfrecords/test*.tfrec") -> None:
@@ -491,7 +814,26 @@ def _strip_tfrecord_labels(pub: Path, pattern: str = "tfrecords/test*.tfrec") ->
         print(f"stripped target from {p.name} ({n} records)")
 
 
-POSTS = {"siim": _strip_tfrecord_labels,
+def _hubmap_test_labels(pub: Path) -> None:
+    """hubmap: MLE-bench copies each test slide's <id>.json (its glomerulus polygons: the answer) into public/test/;
+    Kaggle's test folder had only the image and its anatomical-structure file. Removed, from MLE-bench's test slides
+    too. test/sample_submission.csv (a copy prepare.py puts there) is rewritten as the merged sample."""
+    import re
+
+    for p in sorted((pub / "test").glob("*.json")):
+        if re.fullmatch(r"[0-9a-f]+\.json", p.name):
+            p.unlink()
+            print(f"removed test label file {p.name}")
+    q = pub / "test" / "sample_submission.csv"
+    q.unlink(missing_ok=True)
+    shutil.copyfile(pub / "sample_submission.csv", q)
+
+
+def _gesture_drop_training3(pub: Path) -> None:
+    (pub / "training3.tar.gz").unlink()
+
+
+POSTS = {"gesture": _gesture_drop_training3, "siim": _strip_tfrecord_labels, "hubmap": _hubmap_test_labels,
          "cassava": lambda pub: _strip_tfrecord_labels(pub, "test_tfrecords/*.tfrec")}
 
 
@@ -546,7 +888,82 @@ def _make_mlsp(comp, out: Path) -> Path:
     return out
 
 
-CUSTOM = {"mlsp": _make_mlsp}
+def _make_herbarium(comp, out: Path) -> Path:
+    """herbarium-2020: MLE-bench's per-category rule (1 image: train; <5: the last max(1, 20%) to test; else
+    train_test_split(test_size=0.2, random_state=0)) applied to MLE-bench's train metadata, its validation images
+    shuffled with random.Random(0) as it did. Its prepare.py numbers test images 0.. (images/<id // 1000>/<id>.jpg), so
+    instead of running it again the validation images are numbered after MLE-bench's test images, in the same layout,
+    and appended to test/metadata.json and sample_submission.csv."""
+    import random
+
+    from sklearn.model_selection import train_test_split
+
+    pub0, nb = comp.public_dir, "nybg2020"
+    with open(pub0 / nb / "train/metadata.json", encoding="latin-1") as f:
+        meta = json.load(f)
+    by_cat: dict = {}
+    for a, im in zip(meta["annotations"], meta["images"]):
+        assert a["image_id"] == im["id"]
+        by_cat.setdefault(a["category_id"], []).append({"annotation": a, "image": im})
+    keep, val = [], []
+    for items in by_cat.values():
+        n = len(items)
+        if n == 1:
+            tr, te = items, []
+        elif n < 5:
+            k = max(1, int(n * 0.2))
+            tr, te = items[:-k], items[-k:]
+        else:
+            tr, te = train_test_split(items, test_size=0.2, random_state=0)
+        keep += tr
+        val += te
+    random.Random(0).shuffle(val)
+    with open(pub0 / nb / "test/metadata.json", encoding="latin-1") as f:
+        test_meta = json.load(f)
+    n_test = len(test_meta["images"])
+    assert {int(im["id"]) for im in test_meta["images"]} == set(range(n_test))
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        pub, priv = Path(tmp) / "public", Path(tmp) / "private_val"
+        (pub / nb / "train").mkdir(parents=True)
+        priv.mkdir()
+        _link_tree(pub0 / "description.md", pub / "description.md")
+        _link_tree(pub0 / nb / "test/images", pub / nb / "test/images")  # MLE-bench's test images
+        new_train = {**meta, "annotations": [x["annotation"] for x in keep], "images": [x["image"] for x in keep]}
+        for im in new_train["images"]:
+            q = pub / nb / "train" / im["file_name"]
+            q.parent.mkdir(parents=True, exist_ok=True)
+            os.link(pub0 / nb / "train" / im["file_name"], q)
+        with open(pub / nb / "train/metadata.json", "w") as f:
+            json.dump(new_train, f, indent=4, sort_keys=True)
+        answers, sample = [], []
+        for i, x in enumerate(val):
+            vid = n_test + i
+            im = {**x["image"], "id": str(vid), "file_name": f"images/{vid // 1000:03d}/{vid}.jpg"}
+            q = pub / nb / "test" / im["file_name"]
+            q.parent.mkdir(parents=True, exist_ok=True)
+            os.link(pub0 / nb / "train" / x["image"]["file_name"], q)
+            test_meta["images"].append(im)
+            answers.append({"Id": str(vid), "Predicted": x["annotation"]["category_id"]})
+        with open(pub / nb / "test/metadata.json", "w") as f:
+            json.dump(test_meta, f, indent=4, sort_keys=True)
+        val_ans = pd.DataFrame(answers)
+        val_ans.to_csv(priv / "answers.csv", index=False)
+        pd.concat([_read_table(pub0 / "sample_submission.csv"), val_ans.assign(Predicted="0")]).to_csv(
+            pub / "sample_submission.csv", index=False)
+        # leak checks: no validation image is a train' file or in train' metadata; every train' category kept
+        val_files = {x["image"]["file_name"] for x in val}
+        assert not val_files & {im["file_name"] for im in new_train["images"]}
+        assert not any((pub / nb / "train" / f).exists() for f in val_files), "leak: validation image in train'"
+        shutil.move(str(pub), out / "public")
+        shutil.move(str(priv), out / "private_val")
+    stats = {"competition": comp.id, "id_column": "Id", "validation_ids": len(val), "test_ids": n_test,
+             "answers": "answers.csv", "seed": 0}
+    (out / "valsplit.json").write_text(json.dumps(stats, indent=1) + "\n")
+    (out / "DONE").touch()
+    return out
+
+
+CUSTOM = {"mlsp": _make_mlsp, "herbarium": _make_herbarium}
 
 
 def _load_answers(p: Path) -> pd.DataFrame:
@@ -608,6 +1025,8 @@ def _check_no_leak(pub: Path, spec: Spec, val_ids: set[str], id_col: str) -> Non
                 raise AssertionError(f"leak: {rel} holds validation files, e.g. {sorted(hit)[:3]}")
         elif p.suffix in (".json", ".jsonl", ".7z"):
             hit = _json_ids(p, id_col) & val_ids
+            if spec.json_id:
+                hit |= _json_ids(p, spec.json_id) & _file_ids(val_ids, spec)
             if hit:
                 raise AssertionError(f"leak: {rel} holds {len(hit)} validation records, e.g. {sorted(hit)[:3]}")
         if _has_id(rel, _file_ids(val_ids, spec)):
@@ -708,10 +1127,12 @@ def make(cid: str, force: bool = False) -> Path:
         pub.mkdir()
         produced = {p.name for p in pub_v.iterdir()}
         for p in pub0.iterdir():  # MLE-bench's public: test side merged, train side replaced, the rest kept
-            if p.name in spec.test_side:
+            if p.name in spec.keep_public:
+                _link_tree(p, pub / p.name)
+            elif p.name in spec.test_side:
                 if p.name not in produced:
                     raise AssertionError(f"{cid}: prepare.py wrote no validation part of {p.name}")
-                _merge(p, pub_v / p.name, pub / p.name, tmp, _file_ids(test_ids, spec))
+                _merge(p, pub_v / p.name, pub / p.name, tmp, _file_ids(test_ids, spec), whole=p.name in spec.whole_test)
             elif p.name in produced:
                 _link_tree(pub_v / p.name, pub / p.name)
             else:
@@ -736,7 +1157,16 @@ def make(cid: str, force: bool = False) -> Path:
     return out
 
 
+def require_pandas2() -> None:
+    """MLE-bench's prepare.py scripts break under pandas 3 (`.unique()` returns an ArrowStringArray that
+    train_test_split rejects): stop early instead of failing halfway through a competition."""
+    if int(pd.__version__.split(".")[0]) >= 3:
+        raise SystemExit(f"pandas {pd.__version__}: run this with the grader venv's python (pandas<3; "
+                         "src/benchmarks/mlebench/setup_grader_venv.sh)")
+
+
 def main() -> None:
+    require_pandas2()
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--competition", required=True, help="comma-separated ids, or 'all' for every supported one")
     ap.add_argument("--force", action="store_true", help="rebuild even if done")

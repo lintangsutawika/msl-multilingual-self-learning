@@ -77,6 +77,8 @@ def prepare(competition_id: str) -> None:
     comp = registry.get_competition(competition_id)
     if is_dataset_prepared(comp):
         return
+    from .valsplit import require_pandas2
+    require_pandas2()
     zip_path = comp.raw_dir.parent / f"{competition_id}.zip"
     _drop_partial_extraction(comp, zip_path)
     for attempt in (1, 2):

@@ -5,6 +5,9 @@
 set -uo pipefail
 cd /workspace
 SAMPLE=$(find /workspace/public -maxdepth 1 -type f \( -iname '*sample*submission*.csv' -o -iname '*sample*submission*.csv.zip' -o -iname '*sample*submission*.csv.7z' \) | sort | head -1)
+# competitions whose starting file isn't named *sample*submission*: multi-modal-gesture's randomPredictions.csv,
+# billion-word's test_v2.txt.zip (MLE-bench's sample IS the test file: the sentences with a word missing)
+[ -n "$SAMPLE" ] || SAMPLE=$(ls /workspace/public/randomPredictions.csv /workspace/public/test_v2.txt.zip 2>/dev/null | head -1)
 [ -n "$SAMPLE" ] || { echo "oracle: no sample submission in /workspace/public" >&2; exit 1; }
 case "$SAMPLE" in
   *.zip) python3 -c 'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); open("/workspace/predictions.csv", "wb").write(z.read(z.namelist()[0]))' "$SAMPLE" ;;
