@@ -11,7 +11,8 @@ prepare.py (valsplit.py), and the final grade is MLE-bench's, on MLE-bench's unt
   * environment/private_val/ the validation answers (root-only, like private/); with --mount-data they stay on the
                              host instead (task.toml val_answers, graded by validate_host.py). private/ is unchanged.
   * validate.py, validate_server.py  grade only the validation rows (grade_subset.py, copied to /opt/msl).
-  * tests/test.sh            grades only MLE-bench's test rows, so the score and medal are MLE-bench's.
+  * tests/test.sh            grades only MLE-bench's test rows, so the score and medal are MLE-bench's; also
+                             the validation rows (val_score / val_valid in grade.json, which the trainer reads).
   * instruction.md           describes the validation set.
 
 The split must exist (valsplit.py) and should have passed the leak audit (audit_leaks.py): scripts/mlebench_tasks.sh
@@ -74,13 +75,31 @@ def _grade_full() -> float:  # the unsplit grader, unused
 '''
 
 TEST_SUBSET = '''# Validation split (make_split_tasks.py): predictions.csv also covers the validation rows; grade only MLE-bench's
-# test rows, so the score and medal are MLE-bench's.
+# test rows, so the score and medal are MLE-bench's. The validation rows are graded too (val_score / val_valid in
+# grade.json): the final submission on the scale of `validate`, which the trainer compares with the validate scores.
+VAL=/workspace/private_val; [ -d /tests/private_val ] && VAL=/tests/private_val
 if [ -f "$SUBMISSION" ]; then
+    python3 - "$SUBMISSION" "$COMPETITION" "$VAL" > "$WORKDIR/val.json" 2>>"$WORKDIR/grade.log" <<'PY' || true
+import json, sys
+sys.path.insert(0, "/opt/msl")
+from grade_subset import grade
+try:
+    print(json.dumps({"val_score": grade(*sys.argv[1:]), "val_valid": True}))
+except Exception as e:
+    print(json.dumps({"val_score": None, "val_valid": False, "val_error": str(e)[:300]}))
+PY
     python3 -c "import sys; sys.path.insert(0, '/opt/msl'); from grade_subset import subset_csv; subset_csv(*sys.argv[1:])" \\
         "$SUBMISSION" "$COMPETITION" "$PRIVATE" "$WORKDIR/predictions.csv"
     SUBMISSION="$WORKDIR/predictions.csv"
 fi
 printf '{"competition_id"'''
+
+TEST_MERGE = '''out.update(medal=medal, reward=tier)
+try:
+    out.update(json.load(open(f"{work}/val.json")))
+except (OSError, ValueError):
+    out.update(val_score=None, val_valid=False)
+'''
 
 WORKFLOW = """# Workflow
 
@@ -131,6 +150,7 @@ def make(task: str, src: Path, dst: Path) -> Path:
         new = (f"public_data = {json.dumps(str((vs / 'public').resolve()))}  # bind-mount at /workspace/public\n"
                f"val_answers = {json.dumps(str((vs / 'private_val').resolve()))}  # graded on the host (validate_host.py)")
         toml.write_text(text.replace(old, new, 1))
+        shutil.copytree(vs / "private_val", out / "tests" / "private_val")  # for val_score in the final grade
     else:
         shutil.copytree(vs / "public", env / "public", copy_function=_link_or_copy)
         shutil.copytree(vs / "private_val", env / "private_val")
@@ -151,6 +171,7 @@ def make(task: str, src: Path, dst: Path) -> Path:
     _patch(env / "validate.py", "def grade(submission_path: str, work: str) -> float:\n", VALIDATE_GRADE)
     _patch(env / "validate_server.py", "def grade() -> float:\n", SERVER_GRADE)
     _patch(out / "tests" / "test.sh", "printf '{\"competition_id\"", TEST_SUBSET)
+    _patch(out / "tests" / "test.sh", "out.update(medal=medal, reward=tier)\n", TEST_MERGE)
     inst = out / "instruction.md"
     text = inst.read_text()
     if "\n# Workflow\n" not in text:

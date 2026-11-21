@@ -113,6 +113,9 @@ def _mount(task: Path, comp) -> None:
     go to tests/, which Harbor uploads only for the final grade. Only small files are copied."""
     shutil.copytree(comp.private_dir, task / "tests" / "private")
     shutil.copy(_leaderboard(comp), task / "tests" / "leaderboard.csv")
+    # The trainer reads <task>/environment/leaderboard.csv (spool_rollout.py: leaderboard percentile rewards); not
+    # copied into the image (the Dockerfile's COPY of it is dropped below).
+    shutil.copy(_leaderboard(comp), task / "environment" / "leaderboard.csv")
     df = task / "environment" / "Dockerfile"
     lines = [l for l in df.read_text().splitlines(keepends=True) if l.strip() not in BAKED_DATA_LINES]
     # Rootless Singularity can't keep a root-only file from the agent: the signing key stays on the host
