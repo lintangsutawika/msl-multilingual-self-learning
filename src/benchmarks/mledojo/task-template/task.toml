@@ -1,0 +1,28 @@
+schema_version = "1.1"
+
+[task]
+name = "mle-train/{task_id}"
+description = "{task_id} ({source}): validation set carved from train; the final grade is the whole test set."
+
+[metadata]
+source = "{source}"
+competition_id = "{task_id}"
+higher_is_better = {higher_is_better}
+id_column = "{id_column}"
+validation_ids = {validation_ids}
+test_ids = {test_ids}
+valsplit_rule = "{valsplit_rule}"
+reward = "{reward}"
+
+[agent]
+user = "agent"
+timeout_sec = {agent_timeout}
+
+[verifier]
+timeout_sec = 1800.0
+
+[environment]
+cpus = {cpus}
+memory_mb = {memory_mb}
+storage_mb = 20480
+network_mode = "public"
