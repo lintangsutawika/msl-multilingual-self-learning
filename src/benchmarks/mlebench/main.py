@@ -37,12 +37,19 @@ SPLIT_DIFFICULTY = {"low": "low", "medium": "medium", "high": "high"}
 DEFAULT_OUTPUT = Path("harbor_tasks")
 
 
+def splits_dir() -> Path:
+    """MLE-bench's experiments/splits dir; a pip-installed mlebench (the prepare env) lacks it, so a copy of its
+    low/medium/high.txt ships here (without it every competition would be filed under "low")."""
+    d = registry.get_splits_dir()
+    return d if (d / "high.txt").exists() else Path(__file__).resolve().parent / "splits"
+
+
 def _load_splits() -> dict[str, list[str]]:
     """Load competition ids per split from the mlebench experiments/splits dir."""
-    splits_dir = registry.get_splits_dir()
+    splits_dir_ = splits_dir()
     out: dict[str, list[str]] = {}
     for name in SPLIT_DIFFICULTY:
-        p = splits_dir / f"{name}.txt"
+        p = splits_dir_ / f"{name}.txt"
         if p.exists():
             out[name] = [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
     return out

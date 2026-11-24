@@ -30,7 +30,11 @@ def _answers(comp_id: str, answers_dir: str):
 def _ids(sub: pd.DataFrame, ans) -> tuple[str, set[str]] | None:
     """The submission's id column and the answers' ids, or None if the answers aren't keyed by it. Answers are a
     DataFrame, or a list of records (JSON-lines answers: tensorflow2-qa)."""
-    col = sub.columns[0] if len(sub.columns) else None
+    # The first column, past a leading unnamed index column (iwildcam-2019's sample submission was written with one).
+    cols = list(sub.columns)
+    while len(cols) > 1 and (str(cols[0]) == "" or str(cols[0]).startswith("Unnamed:")):
+        cols.pop(0)
+    col = cols[0] if cols else None
     if isinstance(ans, pd.DataFrame) and col in ans.columns:
         return col, set(ans[col].astype(str))
     if isinstance(ans, list) and ans and isinstance(ans[0], dict) and col in ans[0]:

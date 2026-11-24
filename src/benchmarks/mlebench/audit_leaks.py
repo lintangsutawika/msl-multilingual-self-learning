@@ -39,6 +39,9 @@ SKIP_SUFFIXES = {".md", ".txt", ".rtf"}
 
 
 
+# herbarium: train images keep Kaggle's ids, test/validation ids are renumbered 0..; data dir under public/
+HERB = {"herbarium-2020-fgvc7": ("nybg2020",), "herbarium-2021-fgvc8": ()}
+
 def _agrees(rows: pd.DataFrame, answers: pd.DataFrame, id_col: str, col: str) -> bool:
     """Do a file's values of answer column `col` give the answers away? MLE-bench's sample submissions often hold
     random placeholders (petfinder, essay scores) or an evenly spaced sequence (google-quest): those vary but agree
@@ -185,13 +188,14 @@ def audit(cid: str) -> list[str]:
                 if len(rows) and leaked:
                     problems.append(f"{rel} ({name}): {len(rows)} test/validation rows carry answer columns {leaked}")
             continue
-        if cid == "herbarium-2020-fgvc7" and rel.parts[:2] == ("nybg2020", "train"):
+        if cid in HERB and rel.parts[:len(HERB[cid]) + 1] == (*HERB[cid], "train"):
             continue  # train images keep Kaggle's image ids, test ids are renumbered 0..: names can't leak; see below
         if not test_side and (p.stem in file_ids or p.stem.split("_")[0] in file_ids and spec.file_id):
             problems.append(f"{rel}: train-side file named after a test/validation id")
-    if cid == "herbarium-2020-fgvc7":  # validation images are hardlinks of MLE-bench's train files: by inode instead
-        test_inodes = {q.stat().st_ino for q in (pub / "nybg2020/test/images").rglob("*.jpg")}
-        shared = [q for q in (pub / "nybg2020/train/images").rglob("*.jpg") if q.stat().st_ino in test_inodes]
+    if cid in HERB:  # validation images are hardlinks of MLE-bench's train files: by inode instead
+        hb = pub.joinpath(*HERB[cid])
+        test_inodes = {q.stat().st_ino for q in (hb / "test/images").rglob("*.jpg")}
+        shared = [q for q in (hb / "train/images").rglob("*.jpg") if q.stat().st_ino in test_inodes]
         if shared:
             problems.append(f"{len(shared)} train' images are test/validation images, e.g. {shared[0].relative_to(pub)}")
     if cid == "nomad2018-predict-transparent-conductors":  # content: no test/validation material's inputs in train

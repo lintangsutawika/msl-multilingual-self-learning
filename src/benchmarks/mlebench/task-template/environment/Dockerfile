@@ -14,6 +14,9 @@ RUN ln -sf /usr/local/bin/python3 /usr/bin/python3 && ln -sf /usr/local/bin/pyth
 RUN pip install --no-cache-dir --no-deps "git+https://github.com/openai/mle-bench.git@{mlebench_rev}" \
  && pip install --no-cache-dir "pandas>=2.2,<3" numpy scipy scikit-learn tqdm diskcache tenacity pyyaml appdirs py7zr \
       levenshtein pycocotools pyquaternion shapely pillow pymongo requests
+# NumPy 2: vinbigdata's grader calls int() on a 1-element array (an error since NumPy 2); index it, as NumPy 1 did.
+RUN sed -i 's/int(np.where(image_ids == image_id)\[0\])/int(np.where(image_ids == image_id)[0][0])/' \
+      "$(python -c 'import mlebench, os; print(os.path.dirname(mlebench.__file__))')/competitions/vinbigdata-chest-xray-abnormalities-detection/grade.py"
 WORKDIR /workspace
 COPY validate_server.py /opt/msl/validate_server.py
 COPY validate.py /opt/msl/validate.py

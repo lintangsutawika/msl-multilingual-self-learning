@@ -46,7 +46,7 @@ if [ $# -gt 0 ]; then
             || { echo "$c: not downloaded to $MLEBENCH_DATA (scripts/prepare_mlebench.sh $SET $c --data ...)" >&2; exit 1; }
     done
 else  # the set's competitions (MLE-bench's split file) whose data is downloaded
-    splits=$("${PY[@]}" -c 'from mlebench.registry import registry; print(registry.get_splits_dir())')
+    splits=$("${PY[@]}" -c 'from src.benchmarks.mlebench.main import splits_dir; print(splits_dir())')
     DATA=$MLEBENCH_DATA
     comps=()
     for c in $(cat "$splits/$LEVEL.txt"); do

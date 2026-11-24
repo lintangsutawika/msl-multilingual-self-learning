@@ -86,6 +86,9 @@ class Spec:
     # test-side dirs that hold ONLY test files in MLE-bench's public (hms' test_spectrograms/, named by a second id):
     # merged whole instead of picking MLE-bench's files by answer id
     whole_test: list[str] = field(default_factory=list)
+    # test-side dirs of JSON tables (3d-object's test_data/*.json, nuScenes style): each file merged as the union of
+    # its records by "token"; a record on both sides (map.json's one map) gets the union of its list fields
+    json_dirs: list[str] = field(default_factory=list)
 
 
 # Competitions whose prepare.py keeps the original ids (no renumbering), so validation and test ids can't collide.
@@ -238,6 +241,7 @@ SPECS: dict[str, Spec] = {
         test_side=["test.bson", "sample_submission.csv"]),
     "herbarium-2020-fgvc7": Spec(custom="herbarium",  # test images renumbered: see _make_herbarium
                                  test_side=["nybg2020/test", "sample_submission.csv"]),  # (for the audit)
+    "herbarium-2021-fgvc8": Spec(custom="herbarium", test_side=["test", "sample_submission.csv"]),  # as 2020
     "hms-harmful-brain-activity-classification": Spec(  # by spectrogram_id, as MLE-bench
         raw={n: n for n in ("train.csv", "example_figures", "train_eegs", "train_spectrograms")},
         test_side=["test.csv", "sample_submission.csv", "test_eegs", "test_spectrograms"],
@@ -245,8 +249,11 @@ SPECS: dict[str, Spec] = {
     # MLE-bench's test = train fragment 3 ("a"); validation = fragment 2 ("b"), train' = fragment 1
     "vesuvius-challenge-ink-detection": Spec(raw={"train": "train"}, prepare="vesuvius",
                                              test_side=["test", "sample_submission.csv"]),
-    "iwildcam-2019-fgvc6": Spec(  # by camera location, as MLE-bench (prepare.py extracts train_images.zip itself)
-        raw={"train.csv": "train.csv", "train_images.zip": "train_images.zip"},
+    # by camera location, as MLE-bench (prepare.py extracts train_images.zip itself). MLE-bench tried seeds until the
+    # test locations held its target share of images (random_state=8); 8 on MLE-bench's train puts 28% in validation,
+    # so the same trial picks 54: 8.6% of the images, MLE-bench's own test share (prepare="iwildcam19")
+    "iwildcam-2019-fgvc6": Spec(
+        raw={"train.csv": "train.csv", "train_images.zip": "train_images.zip"}, prepare="iwildcam19",
         test_side=["test.csv", "test_images.zip", "sample_submission.csv"]),
     "siim-covid19-detection": Spec(  # by study, as MLE-bench; answers "<study>_study" / "<image>_image",
         raw={n: n for n in ("train_study_level.csv", "train_image_level.csv", "train")},  # files test/<study>/../<image>.dcm
@@ -255,6 +262,22 @@ SPECS: dict[str, Spec] = {
         raw={n: n for n in ("iwildcam2020_train_annotations.json", "iwildcam2020_test_information.json",
                             "iwildcam2020_megadetector_results.json", "train")},
         test_side=["test", "iwildcam2020_test_information.json", "sample_submission.csv"]),
+    "seti-breakthrough-listen": Spec(  # files train/<id[0]>/<id>.npy; old_leaky_data is MLE-bench's as is (train side)
+        raw={n: n for n in ("train_labels.csv", "train", "old_leaky_data")}, test_side=["test", "sample_submission.csv"]),
+    "icecube-neutrinos-in-deep-ice": Spec(  # by batch, as MLE-bench: test/ holds whole batch files (batch_<n>.parquet)
+        raw={n: n for n in ("train_meta.parquet", "train", "sensor_geometry.csv")},
+        test_side=["test", "test_meta.parquet", "sample_submission.csv"], whole_test=["test"]),
+    "vinbigdata-chest-xray-abnormalities-detection": Spec(  # by image, as MLE-bench (sizes patched: prepare="vinbig")
+        raw={"train.csv": "train.csv", "train": "train"}, prepare="vinbig", test_side=["test", "sample_submission.csv"]),
+    # by log (scene), as MLE-bench: sample tokens are the ids; images/lidar are named by sensor + timestamp (not by id),
+    # so MLE-bench's test_images/test_lidar are kept whole; the map raster is the same file on both sides
+    "3d-object-detection-for-autonomous-vehicles": Spec(
+        raw={n: n for n in ("train.csv", "train_data", "train_images", "train_lidar", "train_maps")}, prepare="3d",
+        test_side=["test_data", "test_images", "test_lidar", "sample_submission.csv"],
+        whole_test=["test_images", "test_lidar"], json_dirs=["test_data"], keep_public=["test_maps"], json_id="token"),
+    # per category, as MLE-bench (image ids kept); train' images re-tarred by prepare.py, test2019.tar.gz merged
+    "inaturalist-2019-fgvc6": Spec(raw={n: n for n in ("train2019.json", "val2019.json")}, prepare="inat",
+                                   test_side=["test2019.tar.gz", "test2019.json", "kaggle_sample_submission.csv"]),
     "stanford-covid-vaccine": Spec(  # test.json is JSON lines; prepare.py reads its columns from raw test.json
         raw={n: n for n in ("train.json", "test.json", "sample_submission.csv")}, remap="covid",
         file_id="seqpos", json_id="id", test_side=["test.json", "sample_submission.csv"]),
@@ -373,9 +396,30 @@ def _has_id(rel: Path, ids: set[str]) -> bool:
     return any(q in ids or Path(q).stem in ids or q.split(".")[0] in ids or q.split("-")[0] in ids for q in rel.parts)
 
 
-def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str], whole: bool = False) -> None:
+def _merge_json_dir(a: Path, b: Path, out: Path) -> None:
+    out.mkdir(parents=True)
+    names = {p.name for p in a.glob("*.json")} | {p.name for p in b.glob("*.json")}
+    for n in sorted(names):
+        rows: dict[str, dict] = {}
+        for src in (a / n, b / n):
+            for r in (json.loads(src.read_text()) if src.exists() else []):
+                old = rows.get(r["token"])
+                if old is None:
+                    rows[r["token"]] = r
+                elif old != r:
+                    rows[r["token"]] = {k: sorted(set(old[k]) | set(r[k])) if isinstance(old.get(k), list) else old.get(k, r.get(k))
+                                        for k in old.keys() | r.keys()}
+        v = list(rows.values())
+        random.Random(SEED).shuffle(v)
+        (out / n).write_text(json.dumps(v))
+
+
+def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str], whole: bool = False,
+           json_dir: bool = False) -> None:
     """MLE-bench's test entry `a` + validation entry `b` -> `out`."""
-    if a.is_dir() and whole:
+    if a.is_dir() and json_dir:
+        _merge_json_dir(a, b, out)
+    elif a.is_dir() and whole:
         _link_tree(b, out)
         for p in a.rglob("*"):
             if p.is_file():
@@ -407,6 +451,8 @@ def _merge(a: Path, b: Path, out: Path, tmp: Path, test_ids: set[str], whole: bo
         _merge_zip(a, b, out, tmp)
     elif a.suffix == ".jsonl":
         _merge_lines(a, b, out)
+    elif a.suffix == ".parquet":  # (icecube's test_meta): rows of both, shuffled
+        pd.concat([pd.read_parquet(a), pd.read_parquet(b)]).sample(frac=1, random_state=SEED).to_parquet(out, index=False)
     elif a.suffix == ".7z":
         _merge_7z(a, b, out, tmp)
     elif a.name.endswith(".tar.gz"):
@@ -787,7 +833,59 @@ def _prepare_vesuvius(raw: Path, public: Path, private: Path) -> None:
     pd.DataFrame({"Id": ["b"], "Predicted": ["1 1 5 1"]}).to_csv(public / "sample_submission.csv", index=False)
 
 
-PREPARES = {"vesuvius": _prepare_vesuvius, "gesture": _prepare_gesture, "jigsaw": _prepare_jigsaw, "hubmap": _prepare_hubmap, "whale": _prepare_whale, "billion": _prepare_billion,
+def _patched_prepare(cid: str, edits: dict[str, str]):
+    """MLE-bench's prepare.py for cid with literal source edits (each must match exactly once): for scripts that
+    assert the sizes of Kaggle's split, which a rerun on MLE-bench's (smaller) train can't meet."""
+    import importlib
+
+    mod = importlib.import_module(f"mlebench.competitions.{cid}.prepare")
+    src = Path(mod.__file__).read_text()
+    for old, new in edits.items():
+        if src.count(old) != 1:
+            raise ValueError(f"{cid}: patch target found {src.count(old)} times: {old!r}")
+        src = src.replace(old, new)
+    ns = {"__name__": mod.__name__, "__file__": mod.__file__}
+    exec(compile(src, mod.__file__, "exec"), ns)
+    return ns["prepare"]
+
+
+def _prepare_3d(raw: Path, public: Path, private: Path) -> None:
+    # MLE-bench's ego_pose.json repeats a pose once per sample_data record that uses it (152208 entries, 142125 tokens);
+    # the rerun's coverage check counts entries, so compare tokens
+    old = """assert len(set([ego["token"] for ego in new_train_ego_poses + new_test_ego_poses])) == len(
+        ego_poses
+    )"""
+    new = """assert len(set([ego["token"] for ego in new_train_ego_poses + new_test_ego_poses])) == len(
+        {ego["token"] for ego in ego_poses}
+    )"""
+    _patched_prepare("3d-object-detection-for-autonomous-vehicles", {old: new})(raw, public, private)
+
+
+def _prepare_inat(raw: Path, public: Path, private: Path) -> None:
+    """MLE-bench's public train_val2019.tar.gz holds the train images without the train_val2019/ prefix (prepare.py
+    tars public/train_val2019 relative to itself); prepare.py reads raw/train_val2019/<kingdom>/<n>/<x>.jpg and only
+    unpacks Kaggle's tar when that dir is missing: unpack MLE-bench's there (scratch, deleted with the temp dir)."""
+    import tarfile
+    from mlebench.registry import registry
+
+    tar = registry.get_competition("inaturalist-2019-fgvc6").public_dir / "train_val2019.tar.gz"
+    with tarfile.open(tar) as t:
+        t.extractall(raw / "train_val2019", filter="data")
+    registry.get_competition("inaturalist-2019-fgvc6").prepare_fn(raw, public, private)
+
+
+def _prepare_iwildcam19(raw: Path, public: Path, private: Path) -> None:
+    _patched_prepare("iwildcam-2019-fgvc6", {"random_state=8": "random_state=54"})(raw, public, private)
+
+
+def _prepare_vinbig(raw: Path, public: Path, private: Path) -> None:
+    # 13500 train images in MLE-bench's train: test_size=0.1 -> 12150 / 1350
+    _patched_prepare("vinbigdata-chest-xray-abnormalities-detection",
+                     {"expected_train_size = 13500": "expected_train_size = 12150",
+                      "expected_test_size = 1500": "expected_test_size = 1350"})(raw, public, private)
+
+
+PREPARES = {"vesuvius": _prepare_vesuvius, "vinbig": _prepare_vinbig, "iwildcam19": _prepare_iwildcam19, "inat": _prepare_inat, "3d": _prepare_3d, "gesture": _prepare_gesture, "jigsaw": _prepare_jigsaw, "hubmap": _prepare_hubmap, "whale": _prepare_whale, "billion": _prepare_billion,
             "jigsaw_ub": _prepare_jigsaw_ub, "freesound": _prepare_freesound}
 
 
@@ -890,7 +988,7 @@ def _make_mlsp(comp, out: Path) -> Path:
 
 
 def _make_herbarium(comp, out: Path) -> Path:
-    """herbarium-2020: MLE-bench's per-category rule (1 image: train; <5: the last max(1, 20%) to test; else
+    """herbarium-2020 / 2021: MLE-bench's per-category rule (1 image: train; <5: the last max(1, 20%) to test; else
     train_test_split(test_size=0.2, random_state=0)) applied to MLE-bench's train metadata, its validation images
     shuffled with random.Random(0) as it did. Its prepare.py numbers test images 0.. (images/<id // 1000>/<id>.jpg), so
     instead of running it again the validation images are numbered after MLE-bench's test images, in the same layout,
@@ -899,8 +997,10 @@ def _make_herbarium(comp, out: Path) -> Path:
 
     from sklearn.model_selection import train_test_split
 
-    pub0, nb = comp.public_dir, "nybg2020"
-    with open(pub0 / nb / "train/metadata.json", encoding="latin-1") as f:
+    # 2020 keeps its data under nybg2020/ and its metadata is latin-1; 2021 has train/, test/ at the top, in UTF-8
+    nb, enc = {"herbarium-2020-fgvc7": ("nybg2020", "latin-1")}.get(comp.id, ("", "utf-8"))
+    pub0 = comp.public_dir
+    with open(pub0 / nb / "train/metadata.json", encoding=enc) as f:
         meta = json.load(f)
     by_cat: dict = {}
     for a, im in zip(meta["annotations"], meta["images"]):
@@ -919,7 +1019,7 @@ def _make_herbarium(comp, out: Path) -> Path:
         keep += tr
         val += te
     random.Random(0).shuffle(val)
-    with open(pub0 / nb / "test/metadata.json", encoding="latin-1") as f:
+    with open(pub0 / nb / "test/metadata.json", encoding=enc) as f:
         test_meta = json.load(f)
     n_test = len(test_meta["images"])
     assert {int(im["id"]) for im in test_meta["images"]} == set(range(n_test))
@@ -1019,6 +1119,13 @@ def _check_no_leak(pub: Path, spec: Spec, val_ids: set[str], id_col: str) -> Non
                 hit = val_ids & set(pd.read_csv(p, usecols=[id_col], dtype=str)[id_col])
                 if hit:
                     raise AssertionError(f"leak: {rel} holds {len(hit)} validation ids, e.g. {sorted(hit)[:3]}")
+        elif p.suffix == ".parquet":
+            import pyarrow.parquet as pq
+
+            if id_col in pq.read_schema(p).names:
+                hit = val_ids & set(map(str, pq.read_table(p, columns=[id_col]).column(id_col).to_pylist()))  # (may be the index)
+                if hit:
+                    raise AssertionError(f"leak: {rel} holds {len(hit)} validation ids, e.g. {sorted(hit)[:3]}")
         elif p.suffix == ".zip":
             with zipfile.ZipFile(p) as z:
                 hit = {Path(n).stem for n in z.namelist()} & val_ids
@@ -1045,6 +1152,16 @@ def _json_ids(p: Path, id_col: str) -> set[str]:
         with tempfile.TemporaryDirectory(dir=p.parent.parent) as t, py7zr.SevenZipFile(p) as s:
             s.extractall(t)
             return set().union(*(_json_ids(q, id_col) for q in Path(t).rglob("*") if q.is_file()))
+    if p.suffix == ".json" and p.stat().st_size < (4 << 30):
+        # COCO-style (inaturalist): records are images/annotations; categories and licenses have small "id"s of their
+        # own that would collide with image ids under the text search.
+        try:
+            d = json.loads(p.read_bytes())
+        except json.JSONDecodeError:
+            d = None
+        if isinstance(d, dict) and isinstance(d.get("images"), list) and any(id_col in r for r in d["images"][:1]):
+            return ({str(r[id_col]) for r in d["images"] if id_col in r}
+                    | {str(r["image_id"]) for r in d.get("annotations", []) if "image_id" in r})
     pat = re.compile(rb'"' + re.escape(id_col.encode()) + rb'"\s*:\s*"?([^",}\s]+)')
     ids: set[str] = set()
     with open(p, "rb") as f:
@@ -1133,7 +1250,8 @@ def make(cid: str, force: bool = False) -> Path:
             elif p.name in spec.test_side:
                 if p.name not in produced:
                     raise AssertionError(f"{cid}: prepare.py wrote no validation part of {p.name}")
-                _merge(p, pub_v / p.name, pub / p.name, tmp, _file_ids(test_ids, spec), whole=p.name in spec.whole_test)
+                _merge(p, pub_v / p.name, pub / p.name, tmp, _file_ids(test_ids, spec), whole=p.name in spec.whole_test,
+                       json_dir=p.name in spec.json_dirs)
             elif p.name in produced:
                 _link_tree(pub_v / p.name, pub / p.name)
             else:
