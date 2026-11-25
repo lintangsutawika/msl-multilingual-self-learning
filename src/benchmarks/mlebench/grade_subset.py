@@ -27,6 +27,30 @@ def _answers(comp_id: str, answers_dir: str):
     return comp, load_answers(Path(answers_dir) / rel)
 
 
+# Graders that break under NumPy 2 (the prepare env and the task image install it): literal fixes, applied when the
+# installed grader still has the old line (the task image also seds it at build time).
+_NUMPY2_FIXES = {
+    # int() of a 1-element array: an error since NumPy 2; index it, as NumPy 1 did
+    "vinbigdata-chest-xray-abnormalities-detection": ("int(np.where(image_ids == image_id)[0])",
+                                                     "int(np.where(image_ids == image_id)[0][0])"),
+}
+
+
+def _grade_fn(comp):
+    fix = _NUMPY2_FIXES.get(comp.id)
+    if fix is None:
+        return comp.grader.grade_fn
+    import importlib
+
+    mod = importlib.import_module(f"mlebench.competitions.{comp.id}.grade")
+    src = Path(mod.__file__).read_text()
+    if fix[0] not in src:  # already fixed
+        return comp.grader.grade_fn
+    ns = {"__name__": mod.__name__, "__file__": mod.__file__}
+    exec(compile(src.replace(fix[0], fix[1]), mod.__file__, "exec"), ns)
+    return ns["grade"]
+
+
 def _ids(sub: pd.DataFrame, ans) -> tuple[str, set[str]] | None:
     """The submission's id column and the answers' ids, or None if the answers aren't keyed by it. Answers are a
     DataFrame, or a list of records (JSON-lines answers: tensorflow2-qa)."""
@@ -74,7 +98,7 @@ def grade(submission_csv: str, comp_id: str, answers_dir: str) -> float:
     comp, ans = _answers(comp_id, answers_dir)
     sub = _subset(read_csv(submission_csv), ans)
     try:
-        score = comp.grader.grade_fn(sub, ans)
+        score = _grade_fn(comp)(sub, ans)
     except InvalidSubmissionError as e:
         raise ValueError(f"invalid submission: {e}") from None
     if score is None:

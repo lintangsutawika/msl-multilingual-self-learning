@@ -13,6 +13,9 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "mlebench",
     "pandas>=2.2,<3",
+    # icecube: MLE-bench's prepare.py writes its parquet files with fastparquet; valsplit.py reads them with pyarrow
+    "fastparquet",
+    "pyarrow",
 ]
 
 [tool.uv]
