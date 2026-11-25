@@ -16,10 +16,12 @@
 #
 # Options: --data DIR (MLE-bench's data dir, as given to prepare_mlebench.sh; default ~/.cache/mle-bench/data or
 # $MLEBENCH_DATA), --mount-data (Babel / Singularity: the data is mounted read-only at run time instead of copied into
-# each task; run the tasks with src/benchmarks/mlebench/run_babel.sh). Sets: lite (= MLE-bench's "low" split), medium,
+# each task; run the tasks with src/benchmarks/mlebench/run_babel.sh), --resplit (redo the validation split even if one
+# exists, e.g. after a split rule changed; seeded, so an unchanged rule gives the same split). Sets: lite (= MLE-bench's "low" split), medium,
 # high. Env: OUT (default harbor_tasks). Splitting big competitions takes a while: run it in a CPU job.
 set -euo pipefail
 MOUNT=()
+RESPLIT=()
 DATA=${MLEBENCH_DATA:-$HOME/.cache/mle-bench/data}
 args=()
 while [ $# -gt 0 ]; do
@@ -27,6 +29,7 @@ while [ $# -gt 0 ]; do
         --data) DATA=$2; shift 2 ;;
         --data=*) DATA=${1#--data=}; shift ;;
         --mount-data) MOUNT=(--mount-data); shift ;;
+        --resplit) RESPLIT=(--force); shift ;;
         *) args+=("$1"); shift ;;
     esac
 done
@@ -58,7 +61,7 @@ C=$(IFS=,; echo "${comps[*]}")
 echo "== ${#comps[@]} competitions -> $OUT"
 
 echo "== 1. validation split"
-"${PY[@]}" -m src.benchmarks.mlebench.valsplit --competition "$C"
+"${PY[@]}" -m src.benchmarks.mlebench.valsplit --competition "$C" ${RESPLIT[@]+"${RESPLIT[@]}"}
 echo "== 2. leak audit"
 "${PY[@]}" -m src.benchmarks.mlebench.audit_leaks --competition "$C" \
     || { echo "leak audit failed: no tasks built (fix the split first)" >&2; exit 1; }
