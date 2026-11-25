@@ -55,7 +55,7 @@ N_ATTEMPTS="${N_ATTEMPTS:-4}"
 MAX_GEN_TOKENS="${MAX_GEN_TOKENS:-16384}"
 TAG="${SLURM_ARRAY_JOB_ID:-${SLURM_JOB_ID:-$$}}_${SLURM_ARRAY_TASK_ID:-0}"
 PORT="${PORT:-$((20000 + $(printf '%s' "$TAG" | cksum | cut -d' ' -f1) % 20000))}"
-: "${VLLM_CUDA_SIF:?set VLLM_CUDA_SIF (the vLLM Singularity image)}" "${CACHE_DIR:?set CACHE_DIR (host cache for vLLM: Hugging Face models)}"
+[ -n "${LLM_ENV_FILE:-}" ] || : "${VLLM_CUDA_SIF:?set VLLM_CUDA_SIF (the vLLM Singularity image)}" "${CACHE_DIR:?set CACHE_DIR (host cache for vLLM: Hugging Face models)}"
 export VLLM_CUDA_SIF CACHE_DIR
 FIRST=${TASKS%% *}
 export JOBS_DIR="${JOBS_DIR:-$(dirname "$(dirname "$FIRST")")/sweeps/${SWEEP_NAME}}"
@@ -85,25 +85,45 @@ EOF
 done
 [ ${#todo[@]} -eq 0 ] && { log "nothing to do"; exit 0; }
 
-VSCRATCH="/scratch/${USER}/vllm-${TAG}"
-mkdir -p "$VSCRATCH"
-log "host=$(hostname) model=${MODEL} port=${PORT} tasks=${todo[*]}"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
-# The model's serve flags (configs/serve/<MODEL>.json) plus the response cap as vLLM's default max_tokens.
-SERVE_ARGS=$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["extra_args"]))' "configs/serve/${MODEL}.json")
-VLLM_ARGS_EXTRA="${SERVE_ARGS} --override-generation-config {\"max_new_tokens\":${MAX_GEN_TOKENS}}" \
-DATA_PARALLEL=1 TENSOR_PARALLEL=1 PORT="$PORT" BASE_DIR="$VSCRATCH" MODEL="$MODEL" \
-  bash scripts/serve/serve_vllm.sh > "${JOBS_DIR}/vllm-${TAG}.log" 2>&1 &
-VLLM=$!
-trap 'pkill -TERM -P $VLLM 2>/dev/null; kill $VLLM 2>/dev/null; rm -rf "$VSCRATCH"' EXIT
-trap 'exit 143' TERM INT
-for _ in $(seq 1 180); do
-  curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 && break
-  kill -0 $VLLM 2>/dev/null || { log "vLLM exited during startup"; tail -30 "${JOBS_DIR}/vllm-${TAG}.log"; exit 1; }
-  sleep 10
-done
-curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null || { log "vLLM not healthy after 30 min"; exit 1; }
-log "vLLM healthy; $(grep -o "Default sampling parameters.*" "${JOBS_DIR}/vllm-${TAG}.log" | head -1)"
+if [ -n "${LLM_ENV_FILE:-}" ]; then
+  # Remote model (LLM_ENV_FILE: <LLM_PREFIX>_BASE_URL, _API_KEY, _MODEL; mode 600): a local proxy adds the key and the
+  # MAX_GEN_TOKENS default, so the agent sees 127.0.0.1 with key EMPTY as with vLLM, and the key is in no command
+  # line or job config. No GPU needed (agent_babel_remote.sbatch).
+  log "host=$(hostname) model=${MODEL} (remote, ${LLM_PREFIX:?set LLM_PREFIX, e.g. QWEN9B}) port=${PORT} tasks=${todo[*]}"
+  MAX_GEN_TOKENS="$MAX_GEN_TOKENS" .venv/bin/python -m src.relay.local_proxy --port "$PORT" --env-file "$LLM_ENV_FILE" \
+    --prefix "$LLM_PREFIX" > "${JOBS_DIR}/proxy-${TAG}.log" 2>&1 &
+  PROXY=$!
+  trap 'kill $PROXY 2>/dev/null' EXIT
+  trap 'exit 143' TERM INT
+  ok=""
+  for _ in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:${PORT}/v1/models" >/dev/null 2>&1 && { ok=1; break; }
+    kill -0 $PROXY 2>/dev/null || break
+    sleep 2
+  done
+  [ -n "$ok" ] || { log "remote model not reachable through the proxy"; cat "${JOBS_DIR}/proxy-${TAG}.log"; exit 1; }
+  log "remote model reachable: $(curl -s "http://127.0.0.1:${PORT}/v1/models" | python3 -c 'import json,sys; print([m["id"] for m in json.load(sys.stdin)["data"]])')"
+else
+  VSCRATCH="/scratch/${USER}/vllm-${TAG}"
+  mkdir -p "$VSCRATCH"
+  log "host=$(hostname) model=${MODEL} port=${PORT} tasks=${todo[*]}"
+  nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+  # The model's serve flags (configs/serve/<MODEL>.json) plus the response cap as vLLM's default max_tokens.
+  SERVE_ARGS=$(python3 -c 'import json,sys; print(" ".join(json.load(open(sys.argv[1]))["extra_args"]))' "configs/serve/${MODEL}.json")
+  VLLM_ARGS_EXTRA="${SERVE_ARGS} --override-generation-config {\"max_new_tokens\":${MAX_GEN_TOKENS}}" \
+  DATA_PARALLEL=1 TENSOR_PARALLEL=1 PORT="$PORT" BASE_DIR="$VSCRATCH" MODEL="$MODEL" \
+    bash scripts/serve/serve_vllm.sh > "${JOBS_DIR}/vllm-${TAG}.log" 2>&1 &
+  VLLM=$!
+  trap 'pkill -TERM -P $VLLM 2>/dev/null; kill $VLLM 2>/dev/null; rm -rf "$VSCRATCH"' EXIT
+  trap 'exit 143' TERM INT
+  for _ in $(seq 1 180); do
+    curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1 && break
+    kill -0 $VLLM 2>/dev/null || { log "vLLM exited during startup"; tail -30 "${JOBS_DIR}/vllm-${TAG}.log"; exit 1; }
+    sleep 10
+  done
+  curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null || { log "vLLM not healthy after 30 min"; exit 1; }
+  log "vLLM healthy; $(grep -o "Default sampling parameters.*" "${JOBS_DIR}/vllm-${TAG}.log" | head -1)"
+fi
 
 RESUME=1 RESUME_LLM_BASE_URL="http://127.0.0.1:${PORT}/v1" RESUME_LLM_API_KEY=EMPTY \
 AGENT="${AGENT:-src.rollout.openhands_agent:CondensingOpenHandsSDK}" JOB_PREFIX="$SWEEP_NAME" N_ATTEMPTS="$N_ATTEMPTS" \

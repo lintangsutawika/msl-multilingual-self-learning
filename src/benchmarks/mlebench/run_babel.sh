@@ -15,7 +15,8 @@
 #      GRADER_PY (host grader's python; default the prepare env's), RESUME=1 (fixed job names; resume an existing job, see below),
 #      RESUME_LLM_BASE_URL, RESUME_LLM_API_KEY (on resume: the agent's new LLM_BASE_URL, and its API key, which Harbor
 #      saves masked),
-#      AGENT_ARGS (extra harbor args, e.g. --ae LLM_BASE_URL=... -m ...), SCRATCH (default /scratch/$USER/hsh).
+#      AGENT_ARGS (extra harbor args, e.g. --ae LLM_BASE_URL=... -m ...), SCRATCH (default /scratch/$USER/hsh),
+#      STAGE_DATA (1: copy the public data to node-local scratch first, see stage_public; 0: mount it from the shared disk).
 set -uo pipefail
 cd "$(dirname "$0")/../../.."
 HARBOR=.venv/bin/harbor
@@ -27,6 +28,48 @@ GRADER_PY=${GRADER_PY:-src/benchmarks/mlebench/prepare/.venv/bin/python}
 [ -x "$GRADER_PY" ] || uv sync -q --project src/benchmarks/mlebench/prepare
 export SINGULARITY_TMPDIR="$SCRATCH/tmp" APPTAINER_TMPDIR="$SCRATCH/tmp"
 export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
+# Node-local copy of a task's public data (STAGE_DATA=1, the default): the shared disk is slow for training reads.
+# /scratch/$USER/mlestage/<key>/public, key = hash of the source path and its mtime, so the path is the same on every
+# node (a job resumed elsewhere finds its saved mount) and changes when the data is rebuilt. Per entry, a lock file:
+# the copy is made under an exclusive lock (other trials on the node wait on a shared lock, then reuse it: no
+# duplicate copies), and every trial using the copy holds a shared lock until its harbor run ends, so eviction (oldest-used first, when
+# scratch lacks room) never removes data in use. If there is no room even then, the shared-disk path is used.
+# Sets STAGED (the path to mount) and SFD (the open lock, closed after the run).
+STAGE_ROOT=${STAGE_ROOT:-/scratch/$USER/mlestage}
+stage_public() {
+    local src=$1 key ent need avail old ofd
+    STAGED=$src; SFD=
+    [ "${STAGE_DATA:-1}" = 1 ] || return 0
+    key=$(printf '%s %s' "$src" "$(stat -c %Y "$src")" | sha1sum | cut -c1-16)
+    ent=$STAGE_ROOT/$key
+    mkdir -p "$ent" || return 0
+    exec {SFD}>"$ent/lock"
+    flock -s "$SFD"   # waits while another trial copies; then, if the copy is done, use it
+    [ -f "$ent/complete" ] || flock -x "$SFD"   # (re)check under the exclusive lock: copy once
+    if [ ! -f "$ent/complete" ]; then
+        rm -rf "${ent:?}/public" "${ent:?}/tmp"
+        need=$(( $(du -sk "$src" | cut -f1) + 20 * 1024 * 1024 ))   # + 20 GB headroom for sandboxes, KB
+        avail=$(df -k --output=avail "$STAGE_ROOT" | tail -1)
+        for old in $(ls -1tr "$STAGE_ROOT"/*/last_used 2>/dev/null); do   # oldest-used first
+            [ "$avail" -ge "$need" ] && break
+            old=$(dirname "$old"); [ "$old" = "$ent" ] && continue
+            exec {ofd}>"$old/lock"
+            if flock -xn "$ofd"; then rm -rf "${old:?}"; avail=$(df -k --output=avail "$STAGE_ROOT" | tail -1); fi
+            exec {ofd}>&-
+        done
+        if [ "$avail" -lt "$need" ]; then
+            echo "    stage: not enough room on $STAGE_ROOT for $src; using the shared disk"
+            exec {SFD}>&-; SFD=; return 0
+        fi
+        echo "    stage: copying $src -> $ent/public ($(( need / 1024 / 1024 - 20 )) GB)"
+        cp -a "$src" "$ent/tmp" && mv "$ent/tmp" "$ent/public" && echo "$src" > "$ent/complete" || {
+            echo "    stage: copy failed; using the shared disk"; rm -rf "${ent:?}/tmp" "${ent:?}/public"
+            exec {SFD}>&-; SFD=; return 0; }
+    fi
+    touch "$ent/last_used"
+    flock -s "$SFD"   # downgrade: other trials may use (not evict) it now
+    STAGED=$ent/public
+}
 rc=0
 for TASK in "$@"; do
     TASK=$(realpath "$TASK")
@@ -34,6 +77,7 @@ for TASK in "$@"; do
     PUB=$(.venv/bin/python -c 'import sys,tomllib; print(tomllib.load(open(sys.argv[1],"rb"))["metadata"]["public_data"])' "$TASK/task.toml") \
         || { echo "SKIP $NAME: no metadata.public_data (build with --mount-data)"; rc=1; continue; }
     [ -d "$PUB" ] || { echo "SKIP $NAME: public data $PUB missing"; rc=1; continue; }
+    stage_public "$PUB"; PUB=$STAGED
     JOBS_DIR=${JOBS_DIR:-$(dirname "$(dirname "$TASK")")/jobs}
     # RESUME=1: a fixed job name, so a rerun (after preemption or resubmission) resumes the same Harbor job.
     if [ "${RESUME:-0}" = 1 ]; then JOB="${JOB_PREFIX:-mlebench}-$NAME"; else JOB="${JOB_PREFIX:-mlebench}-$NAME-$(date +%Y%m%d-%H%M%S)"; fi
@@ -104,6 +148,7 @@ PY
         echo "    resuming $JOBS_DIR/$JOB ($(find "$JOBS_DIR/$JOB" -mindepth 2 -maxdepth 2 -name result.json | wc -l) trial results so far)"
         "$HARBOR" job resume -p "$JOBS_DIR/$JOB" -f CancelledError -f NetworkConnectionError || rc=1
         [ -n "$VPID" ] && { kill $VPID 2>/dev/null; wait $VPID 2>/dev/null; }
+        [ -n "$SFD" ] && exec {SFD}>&-
         continue
     fi
     # shellcheck disable=SC2086  # AGENT_ARGS is a list of flags
@@ -114,5 +159,6 @@ PY
         --mounts "$MOUNTS" ${AGENT_ARGS:-} \
         -o "$JOBS_DIR" --job-name "$JOB" -y --quiet || rc=1
     [ -n "$VPID" ] && { kill $VPID 2>/dev/null; wait $VPID 2>/dev/null; }
+    [ -n "$SFD" ] && exec {SFD}>&-
 done
 exit $rc
