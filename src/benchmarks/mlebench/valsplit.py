@@ -242,6 +242,19 @@ SPECS: dict[str, Spec] = {
     "herbarium-2020-fgvc7": Spec(custom="herbarium",  # test images renumbered: see _make_herbarium
                                  test_side=["nybg2020/test", "sample_submission.csv"]),  # (for the audit)
     "herbarium-2021-fgvc8": Spec(custom="herbarium", test_side=["test", "sample_submission.csv"]),  # as 2020
+    "herbarium-2022-fgvc9": Spec(custom="herbarium22",  # renamed train images: see _make_herbarium22
+                                 test_side=["test_images", "test_metadata.json", "sample_submission.csv"]),
+    "rsna-breast-cancer-detection": Spec(  # by patient, as MLE-bench (10%); answers "<patient>_<L|R>", images
+        raw={n: n for n in ("train.csv", "train_images")},  # <images>/<patient>/<image>.dcm
+        file_id="seqpos", test_side=["test.csv", "test_images", "sample_submission.csv"], whole_test=["test_images"]),
+    "rsna-2022-cervical-spine-fracture-detection": Spec(  # by study; answers "<study>_<C1..C7|patient_overall>"
+        raw={n: n for n in ("train.csv", "train_bounding_boxes.csv", "segmentations", "train_images")},
+        prepare="spine", file_id="seqpos", test_side=["test.csv", "test_images", "sample_submission.csv"],
+        whole_test=["test_images"]),
+    # MLE-bench's test = as many train records as Kaggle's labelled validation set (1856), which stays public as is
+    "google-research-identify-contrails-reduce-global-warming": Spec(
+        raw={n: n for n in ("train_metadata.json", "train", "validation_metadata.json", "validation")},
+        test_side=["test", "sample_submission.csv"], whole_test=["test"]),
     "hms-harmful-brain-activity-classification": Spec(  # by spectrogram_id, as MLE-bench
         raw={n: n for n in ("train.csv", "example_figures", "train_eegs", "train_spectrograms")},
         test_side=["test.csv", "sample_submission.csv", "test_eegs", "test_spectrograms"],
@@ -885,7 +898,15 @@ def _prepare_vinbig(raw: Path, public: Path, private: Path) -> None:
                       "expected_test_size = 1500": "expected_test_size = 1350"})(raw, public, private)
 
 
-PREPARES = {"vesuvius": _prepare_vesuvius, "vinbig": _prepare_vinbig, "iwildcam19": _prepare_iwildcam19, "inat": _prepare_inat, "3d": _prepare_3d, "gesture": _prepare_gesture, "jigsaw": _prepare_jigsaw, "hubmap": _prepare_hubmap, "whale": _prepare_whale, "billion": _prepare_billion,
+def _prepare_spine(raw: Path, public: Path, private: Path) -> None:
+    # MLE-bench keeps 10% of Kaggle's train as train and tests on the other 90%; the same share on MLE-bench's train
+    # would leave ~20 train studies. Jeff (2026-11-24): MLE-bench's test stays as is; the validation set is 10% of
+    # MLE-bench's train instead (~20 studies), drawn by its own code (bbox / segmentation studies kept in train alike).
+    _patched_prepare("rsna-2022-cervical-spine-fracture-detection", {"TRAIN_RATIO = 0.1\n": "TRAIN_RATIO = 0.9\n"})(
+        raw, public, private)
+
+
+PREPARES = {"vesuvius": _prepare_vesuvius, "spine": _prepare_spine, "vinbig": _prepare_vinbig, "iwildcam19": _prepare_iwildcam19, "inat": _prepare_inat, "3d": _prepare_3d, "gesture": _prepare_gesture, "jigsaw": _prepare_jigsaw, "hubmap": _prepare_hubmap, "whale": _prepare_whale, "billion": _prepare_billion,
             "jigsaw_ub": _prepare_jigsaw_ub, "freesound": _prepare_freesound}
 
 
@@ -1064,7 +1085,83 @@ def _make_herbarium(comp, out: Path) -> Path:
     return out
 
 
-CUSTOM = {"mlsp": _make_mlsp, "herbarium": _make_herbarium}
+def _make_herbarium22(comp, out: Path) -> Path:
+    """herbarium-2022: as _make_herbarium, for 2022's layout. MLE-bench's prepare.py splits each category of Kaggle's
+    train with train_test_split(test_size=0.2, random_state=0), renames train images per category
+    (train_images/<cat // 100:03d>/<cat % 100:02d>/<cat:05d>__<k:03d>.jpg, k = 1..) and numbers test images 0..
+    (test_images/<id // 1000:03d>/test-<id:06d>.jpg; test_metadata.json is a list of image records). The same rule on
+    MLE-bench's train gives the validation images; they are numbered after MLE-bench's test images, in the same
+    layout, and appended to test_metadata.json and sample_submission.csv. train' is renumbered k = 1.. per category,
+    as MLE-bench did, so the numbering shows no gaps where validation images were taken out."""
+    import random
+
+    from sklearn.model_selection import train_test_split
+
+    pub0 = comp.public_dir
+    meta = json.loads((pub0 / "train_metadata.json").read_text())
+    by_cat: dict = {}
+    for a, im in zip(meta["annotations"], meta["images"]):
+        assert a["image_id"] == im["image_id"]
+        by_cat.setdefault(a["category_id"], []).append({"annotation": a, "image": im})
+    keep: dict = {}
+    val = []
+    for cat, items in by_cat.items():
+        if len(items) < 2:  # (MLE-bench's own data has none: its assert needs >= 1 image on each side)
+            keep[cat], te = items, []
+        else:
+            keep[cat], te = train_test_split(items, test_size=0.2, random_state=0)
+        val += te
+    random.Random(0).shuffle(val)
+    test_meta = json.loads((pub0 / "test_metadata.json").read_text())
+    n_test = len(test_meta)
+    assert {int(im["image_id"]) for im in test_meta} == set(range(n_test))
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        pub, priv = Path(tmp) / "public", Path(tmp) / "private_val"
+        pub.mkdir()
+        priv.mkdir()
+        _link_tree(pub0 / "description.md", pub / "description.md")
+        _link_tree(pub0 / "test_images", pub / "test_images")  # MLE-bench's test images
+        new_train = {**meta, "annotations": [], "images": []}
+        for cat, items in keep.items():
+            sub = f"{cat // 100:03d}/{cat % 100:02d}"
+            for k, x in enumerate(items):
+                iid = f"{cat:05d}__{k + 1:03d}"
+                new_train["annotations"].append({**x["annotation"], "image_id": iid})
+                new_train["images"].append({**x["image"], "image_id": iid, "file_name": f"{sub}/{iid}.jpg"})
+                q = pub / "train_images" / sub / f"{iid}.jpg"
+                q.parent.mkdir(parents=True, exist_ok=True)
+                os.link(pub0 / "train_images" / x["image"]["file_name"], q)
+        (pub / "train_metadata.json").write_text(json.dumps(new_train, indent=4, sort_keys=True))
+        answers = []
+        for i, x in enumerate(val):
+            vid = n_test + i
+            im = {**x["image"], "image_id": str(vid), "file_name": f"{vid // 1000:03d}/test-{vid:06d}.jpg"}
+            q = pub / "test_images" / im["file_name"]
+            assert not q.exists(), f"validation image {q} collides with a test image"
+            q.parent.mkdir(parents=True, exist_ok=True)
+            os.link(pub0 / "train_images" / x["image"]["file_name"], q)
+            test_meta.append(im)
+            answers.append({"Id": str(vid), "Predicted": x["annotation"]["category_id"]})
+        (pub / "test_metadata.json").write_text(json.dumps(test_meta, indent=4, sort_keys=True))
+        val_ans = pd.DataFrame(answers)
+        val_ans.to_csv(priv / "answers.csv", index=False)
+        pd.concat([_read_table(pub0 / "sample_submission.csv"), val_ans.assign(Predicted=42)]).to_csv(
+            pub / "sample_submission.csv", index=False)
+        # leak checks: no validation image is a train' file (by inode); every category kept in train'
+        val_inodes = {(pub0 / "train_images" / x["image"]["file_name"]).stat().st_ino for x in val}
+        assert not any(q.stat().st_ino in val_inodes for q in (pub / "train_images").rglob("*.jpg")), \
+            "leak: validation image in train'"
+        assert {a["category_id"] for a in new_train["annotations"]} == set(by_cat)
+        shutil.move(str(pub), out / "public")
+        shutil.move(str(priv), out / "private_val")
+    stats = {"competition": comp.id, "id_column": "Id", "validation_ids": len(val), "test_ids": n_test,
+             "answers": "answers.csv", "seed": 0}
+    (out / "valsplit.json").write_text(json.dumps(stats, indent=1) + "\n")
+    (out / "DONE").touch()
+    return out
+
+
+CUSTOM = {"mlsp": _make_mlsp, "herbarium": _make_herbarium, "herbarium22": _make_herbarium22}
 
 
 def _load_answers(p: Path) -> pd.DataFrame:
